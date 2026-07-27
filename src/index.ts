@@ -5,10 +5,11 @@ import { getPort } from "./config/env.js";
 import { getBackendRoot, getRepoRoot } from "./lib/paths.js";
 import { ensureSupportedNodeVersion } from "./system/node-version.js";
 
-// Later files override earlier ones. Prefer backend/.env, then monorepo root, then cwd.
-config({ path: resolve(getRepoRoot(), ".env") });
-config({ path: resolve(process.cwd(), ".env") });
-config({ path: resolve(getBackendRoot(), ".env") });
+// Coolify/Docker inject process.env; local .env files are optional.
+const dotenvOpts = { quiet: true } as const;
+config({ path: resolve(getRepoRoot(), ".env"), ...dotenvOpts });
+config({ path: resolve(process.cwd(), ".env"), ...dotenvOpts });
+config({ path: resolve(getBackendRoot(), ".env"), ...dotenvOpts });
 
 async function run(): Promise<void> {
 	ensureSupportedNodeVersion();

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 
 import { getBackendRoot, getRepoRoot, isMonorepoLayout } from "../lib/paths.js";
 
@@ -7,7 +8,21 @@ export function getPort(): number {
 }
 
 export function getMongoUri(): string {
-	return process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/feynman";
+	const configured = process.env.MONGODB_URI?.trim();
+	if (configured) return configured;
+
+	const fallback = "mongodb://127.0.0.1:27017/feynman";
+	const inDocker = existsSync("/.dockerenv");
+	if (process.env.NODE_ENV === "production" || inDocker) {
+		throw new Error(
+			[
+				"MONGODB_URI is required in production/Docker.",
+				"In Coolify: Environment → add MONGODB_URI pointing at your MongoDB resource",
+				"(e.g. mongodb://USER:PASS@HOST:27017/feynman). Do not use 127.0.0.1 inside a container.",
+			].join(" "),
+		);
+	}
+	return fallback;
 }
 
 export function getWorkingDir(): string {
