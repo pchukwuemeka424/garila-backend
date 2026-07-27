@@ -985,44 +985,6 @@ function notebookDatasetToTable(dataset: NotebookDataset): string {
 	return [header, divider, ...body].join("\n");
 }
 
-function notebookDatasetToChartBlock(dataset: NotebookDataset): string | null {
-	const columns = (dataset.columns ?? []).filter((c) => c.id && c.name);
-	const rows = dataset.rows ?? [];
-	if (columns.length < 1 || rows.length < 2) return null;
-	const numericCols = columns.filter((c) => c.type === "number");
-	const categoryCol =
-		columns.find((c) => c.type !== "number") ?? columns[0];
-	const valueCol = numericCols[0] ?? columns.find((c) => c.id !== categoryCol?.id);
-	if (!categoryCol?.id || !valueCol?.id) return null;
-
-	const data: Array<Record<string, string | number>> = [];
-	for (const row of rows) {
-		if (data.length >= 30) break;
-		const cells = row.cells ?? {};
-		const label = cells[categoryCol.id];
-		const raw = cells[valueCol.id];
-		const num = typeof raw === "number" ? raw : Number(raw);
-		if (label == null || label === "" || !Number.isFinite(num)) continue;
-		data.push({
-			[categoryCol.name!]: String(label),
-			[valueCol.name!]: num,
-		});
-	}
-	if (data.length < 2) return null;
-
-	const title = dataset.name?.trim() || dataset.sourceFileName || "Research note dataset";
-	const payload = {
-		type: "bar" as const,
-		kind: "evidence" as const,
-		title,
-		caption: `From research note dataset “${title}”.`,
-		xKey: categoryCol.name!,
-		yKeys: [valueCol.name!],
-		data,
-	};
-	return ["```research-chart", JSON.stringify(payload, null, 2), "```"].join("\n");
-}
-
 function notebookAssetToFigureBlock(asset: NotebookAsset, index: number): string | null {
 	const dataUrl = asset.dataUrl?.trim() ?? "";
 	const mime = (asset.mime ?? "").toLowerCase();

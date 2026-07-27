@@ -197,8 +197,9 @@ function toProjectDto(
 ): ResearchProjectDto {
 	const status: ProjectStatus =
 		doc.status === "draft" || doc.status === "completed" ? doc.status : "in_progress";
-	const projectType: ResearchProjectType = isResearchProjectType(doc.projectType ?? "")
-		? doc.projectType
+	const rawProjectType = doc.projectType ?? "";
+	const projectType: ResearchProjectType = isResearchProjectType(rawProjectType)
+		? rawProjectType
 		: "research";
 	const sections: ResearchProjectSectionDto[] = mergeSectionsWithTemplate(projectType, doc.sections);
 	return {
@@ -379,8 +380,9 @@ export async function createProject(
 	const uid = requireUserId(userId);
 	const title = input.title?.trim() ?? "";
 	if (!title) throw new Error("Title is required.");
-	const projectType: ResearchProjectType = isResearchProjectType(input.projectType ?? "")
-		? input.projectType
+	const rawProjectType = input.projectType ?? "";
+	const projectType: ResearchProjectType = isResearchProjectType(rawProjectType)
+		? rawProjectType
 		: "research";
 	const doc = await ResearchProjectModel.create({
 		userId: new Types.ObjectId(uid),
@@ -403,8 +405,9 @@ export async function getProject(
 ): Promise<ResearchProjectDto> {
 	const uid = requireUserId(userId);
 	const doc = await requireOwnedProject(uid, projectId);
-	const projectType: ResearchProjectType = isResearchProjectType(doc.projectType ?? "")
-		? doc.projectType
+	const rawProjectType = doc.projectType ?? "";
+	const projectType: ResearchProjectType = isResearchProjectType(rawProjectType)
+		? rawProjectType
 		: "research";
 	if (!doc.projectType || !isResearchProjectType(doc.projectType)) {
 		doc.projectType = projectType;
@@ -416,7 +419,7 @@ export async function getProject(
 		.join("|");
 	const mergedIds = merged.map((section) => section.id).join("|");
 	if (existingIds !== mergedIds || !Array.isArray(doc.sections) || doc.sections.length === 0) {
-		doc.sections = merged;
+		doc.set("sections", merged);
 		doc.markModified("sections");
 	}
 	const counts = await countAssets(uid, doc._id.toString());
@@ -484,7 +487,7 @@ export async function updateProject(
 	if (changingType) {
 		const nextType = input.projectType as ResearchProjectType;
 		doc.projectType = nextType;
-		doc.sections = mergeSectionsWithTemplate(nextType, doc.sections);
+		doc.set("sections", mergeSectionsWithTemplate(nextType, doc.sections));
 		doc.markModified("sections");
 	}
 
@@ -501,11 +504,10 @@ export async function updateProject(
 		}
 		doc.markModified("sections");
 	} else if (!Array.isArray(doc.sections) || doc.sections.length === 0) {
-		const projectType: ResearchProjectType = isResearchProjectType(doc.projectType ?? "")
-			? doc.projectType
-			: "research";
+		const rawType = doc.projectType ?? "";
+		const projectType: ResearchProjectType = isResearchProjectType(rawType) ? rawType : "research";
 		doc.projectType = projectType;
-		doc.sections = buildEmptySections(projectType);
+		doc.set("sections", buildEmptySections(projectType));
 	}
 
 	const counts = await countAssets(uid, doc._id.toString());

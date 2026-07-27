@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { getRepoRoot } from "../lib/paths.js";
+import { getBackendRoot, getRepoRoot, isMonorepoLayout } from "../lib/paths.js";
 
 export function getPort(): number {
 	return Number.parseInt(process.env.PORT ?? "3141", 10);
@@ -13,7 +13,9 @@ export function getMongoUri(): string {
 export function getWorkingDir(): string {
 	const configured = process.env.FEYNMAN_WORKSPACE?.trim();
 	if (configured) return resolve(configured);
-	return getRepoRoot();
+	// Monorepo: Next/export workspace at repo root. Standalone API: backend package root.
+	if (isMonorepoLayout()) return getRepoRoot();
+	return getBackendRoot();
 }
 
 function parseOpenRouterModelSpec(spec: string): string {

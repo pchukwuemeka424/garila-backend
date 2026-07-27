@@ -1,6 +1,6 @@
 import { Types } from "mongoose";
 
-import { SavedResearchIdeaModel } from "../db/models/SavedResearchIdea.js";
+import { SavedResearchIdeaModel, type SavedResearchIdeaDocument } from "../db/models/SavedResearchIdea.js";
 
 export type SavedResearchIdeaDto = {
 	id: string;
@@ -96,12 +96,15 @@ export async function saveResearchIdea(
 		title: input.title.trim(),
 	};
 
+	const ideaType = input.type as SavedResearchIdeaDocument["type"];
+	const feasibility = input.feasibility as SavedResearchIdeaDocument["feasibility"];
+
 	const existing = await SavedResearchIdeaModel.findOne(filter);
 	if (existing) {
 		existing.rationale = input.rationale.trim();
 		existing.approach = input.approach.trim();
-		existing.type = input.type;
-		existing.feasibility = input.feasibility;
+		existing.type = ideaType;
+		existing.feasibility = feasibility;
 		existing.discipline = input.discipline.trim();
 		existing.topic = input.topic.trim();
 		if (input.outline !== undefined) existing.outline = input.outline.trim();
@@ -117,8 +120,8 @@ export async function saveResearchIdea(
 		title: input.title.trim(),
 		rationale: input.rationale.trim(),
 		approach: input.approach.trim(),
-		type: input.type,
-		feasibility: input.feasibility,
+		type: ideaType,
+		feasibility,
 		discipline: input.discipline.trim(),
 		topic: input.topic.trim(),
 		status: input.status ?? "saved",

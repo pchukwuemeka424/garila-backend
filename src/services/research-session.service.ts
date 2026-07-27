@@ -24,13 +24,46 @@ export type ResearchIdeaSessionDto = {
 	updatedAt: string;
 };
 
+function normalizeIdeas(
+	ideas: Array<{
+		id?: string | null;
+		title?: string | null;
+		rationale?: string | null;
+		approach?: string | null;
+		type?: string | null;
+		feasibility?: string | null;
+		outline?: string | null;
+		researchQuestions?: string[] | null;
+	}>,
+): ResearchIdeaInput[] {
+	return ideas.map((idea) => ({
+		id: idea.id ?? "",
+		title: idea.title ?? "",
+		rationale: idea.rationale ?? "",
+		approach: idea.approach ?? "",
+		type: idea.type ?? "",
+		feasibility: idea.feasibility ?? "",
+		...(idea.outline?.trim() ? { outline: idea.outline } : {}),
+		...(idea.researchQuestions?.length ? { researchQuestions: idea.researchQuestions } : {}),
+	}));
+}
+
 function toDto(doc: {
 	_id: Types.ObjectId;
 	userId: Types.ObjectId;
 	discipline: string;
 	topic: string;
 	scope: string;
-	ideas: ResearchIdeaInput[];
+	ideas: Array<{
+		id?: string | null;
+		title?: string | null;
+		rationale?: string | null;
+		approach?: string | null;
+		type?: string | null;
+		feasibility?: string | null;
+		outline?: string | null;
+		researchQuestions?: string[] | null;
+	}>;
 	createdAt: Date;
 	updatedAt: Date;
 }): ResearchIdeaSessionDto {
@@ -40,7 +73,7 @@ function toDto(doc: {
 		discipline: doc.discipline,
 		topic: doc.topic,
 		scope: doc.scope as ResearchIdeaSessionDto["scope"],
-		ideas: doc.ideas,
+		ideas: normalizeIdeas(doc.ideas ?? []),
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
 	};
@@ -82,7 +115,7 @@ export async function saveResearchIdeaSession(
 	const existing = await ResearchIdeaSessionModel.findOne(filter);
 	if (existing) {
 		existing.scope = input.scope;
-		existing.ideas = input.ideas;
+		existing.set("ideas", input.ideas);
 		await existing.save();
 		return toDto(existing);
 	}

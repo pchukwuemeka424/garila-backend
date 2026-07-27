@@ -276,9 +276,10 @@ function resolveUserIdFromWsUrl(urlPath: string | undefined): string | null {
 }
 
 function resolveStaticRoot(repoRoot: string): string | null {
+	// Next static export only — never treat backend `dist/` (compiled JS) as the UI.
 	const candidates = [
 		resolve(repoRoot, "out"),
-		resolve(repoRoot, "dist"),
+		resolve(repoRoot, "frontend", "out"),
 	];
 	for (const candidate of candidates) {
 		if (existsSync(join(candidate, "index.html"))) {
@@ -335,10 +336,17 @@ export async function startServer(port: number): Promise<void> {
 	const staticRoot = resolveStaticRoot(repoRoot);
 	const workflows = listWorkflows(ctx.backendRoot);
 
-	const app = Fastify({ logger: false });
+	const app = Fastify({
+		logger: false,
+		// Required behind nginx / Coolify reverse proxies
+		trustProxy: true,
+	});
 
+	const corsOrigin = process.env.CORS_ORIGIN?.trim();
 	await app.register(cors, {
-		origin: true,
+		origin: corsOrigin
+			? corsOrigin.split(",").map((value) => value.trim()).filter(Boolean)
+			: true,
 		methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "Authorization"],
 	});
@@ -3467,9 +3475,10 @@ export async function startServer(port: number): Promise<void> {
 	}
 
 	await app.listen({ port, host: "0.0.0.0" });
-	console.log(`GARIL AI web UI: http://localhost:${port}`);
-	if (!staticRoot) {
-		console.log("Frontend not built. Run: npm run build (or npm run deploy:build)");
+	if (staticRoot) {
+		console.log(`GARIL AI (API + UI): http://0.0.0.0:${port}`);
+	} else {
+		console.log(`GARIL AI API: http://0.0.0.0:${port}  (health: /api/health)`);
 	}
 
 	const shutdown = async () => {
