@@ -1,0 +1,16 @@
+# Coolify: when Base Directory = backend/
+providers = ["node"]
+
+[variables]
+NODE_ENV = "production"
+NIXPACKS_NODE_VERSION = "22"
+PORT = "3141"
+
+[phases.install]
+cmds = ["npm ci"]
+
+[phases.build]
+cmds = ["npx tsc -p tsconfig.json"]
+
+[start]
+cmd = "node dist/index.js"

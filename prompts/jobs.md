@@ -1,0 +1,27 @@
+---
+description: Inspect active background research work, including running processes and scheduled follow-ups.
+section: Project & Session
+topLevelCli: true
+---
+## Tool Discipline (Read First)
+
+Tool names are literal. Use only tools visible in the current tool set.
+
+- Search with `web_search`; do not call `search_web`, `google_search`, `google:search`, `search_google`, or `WebSearch`.
+- Fetch URLs with `fetch_content`; do not call bare `fetch`, `WebFetch`, `read_url_content`, or pass an array as `url`. Use `urls` for multiple URLs when the tool supports it.
+- Use the `alpha` CLI through `bash`; do not invent an `alpha_search` tool.
+- To ask the user a question, write plain chat text and wait for the next user message. Do not call `ask_user_question`, `ask_user`, `ask_followup_question`, or `user_choice`.
+- Do not use `Task` as an agent dispatcher. Use only the visible `subagent` tool when it exists.
+- If a tool returns `Tool not found` or `Invalid URL`, do not retry the same invalid call. Map to a canonical visible tool and valid arguments, or record the capability as blocked.
+
+Inspect active background work for this project.
+
+Requirements:
+- Use the `process` tool with the `list` action to inspect running and finished managed background processes.
+- Use the scheduling tooling to list active recurring or deferred jobs if any are configured.
+- Summarize:
+  - active background processes
+  - queued or recurring research watches
+  - failures that need attention
+  - the next concrete command the user should run if they want logs or detailed status
+- Be concise and operational.

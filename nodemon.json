@@ -1,0 +1,8 @@
+{
+  "watch": ["src", "prompts"],
+  "ext": "ts,json,md",
+  "ignore": ["dist/**", "src/**/*.test.ts"],
+  "exec": "npx tsx src/index.ts",
+  "signal": "SIGTERM",
+  "delay": 500
+}
