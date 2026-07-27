@@ -31,3 +31,10 @@ docker run --rm -p 3141:3141 --env-file .env garila-backend
 ```bash
 sudo bash setup-vps.sh /var/www/garila-backend
 ```
+
+## PM2
+
+```bash
+npm ci && npx tsc -p tsconfig.json
+pm2 start ecosystem.config.cjs
+```
