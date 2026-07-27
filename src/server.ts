@@ -358,6 +358,14 @@ export async function startServer(port: number): Promise<void> {
 			prefix: "/",
 			decorateReply: false,
 		});
+	} else {
+		app.get("/", async () => ({
+			ok: true,
+			name: "GARIL AI API",
+			version: ctx.version,
+			health: "/api/health",
+			websocket: "/ws",
+		}));
 	}
 
 	app.get("/api/health", async () => ({ ok: true, version: ctx.version }));
