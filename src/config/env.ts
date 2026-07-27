@@ -116,3 +116,81 @@ export function getPaperLibraryMinHits(): number {
 	if (!Number.isFinite(raw) || raw < 1) return 4;
 	return Math.min(raw, 20);
 }
+
+/** S3-compatible storage (MinIO / AWS). Optional — disabled when endpoint or keys are missing. */
+export type S3Config = {
+	endpoint: string;
+	region: string;
+	bucket: string;
+	accessKeyId: string;
+	secretAccessKey: string;
+	forcePathStyle: boolean;
+	publicUrl: string | null;
+};
+
+export function getS3Endpoint(): string | null {
+	return process.env.S3_ENDPOINT?.trim() || null;
+}
+
+export function getS3Region(): string {
+	return process.env.S3_REGION?.trim() || "us-east-1";
+}
+
+export function getS3Bucket(): string {
+	return process.env.S3_BUCKET?.trim() || "garil";
+}
+
+export function getS3AccessKey(): string | null {
+	return process.env.S3_ACCESS_KEY?.trim() || null;
+}
+
+export function getS3SecretKey(): string | null {
+	return process.env.S3_SECRET_KEY?.trim() || null;
+}
+
+export function isS3ForcePathStyle(): boolean {
+	return process.env.S3_FORCE_PATH_STYLE !== "false";
+}
+
+/** Optional CDN / public base URL for objects (defaults to endpoint). */
+export function getS3PublicUrl(): string | null {
+	return process.env.S3_PUBLIC_URL?.trim() || null;
+}
+
+export function isS3Enabled(): boolean {
+	return Boolean(getS3Endpoint() && getS3AccessKey() && getS3SecretKey());
+}
+
+/** Max object size for direct MinIO uploads (default 2 GiB). */
+export function getS3MaxUploadBytes(): number {
+	const raw = Number.parseInt(process.env.S3_MAX_UPLOAD_BYTES ?? String(2 * 1024 * 1024 * 1024), 10);
+	if (!Number.isFinite(raw) || raw < 1) return 2 * 1024 * 1024 * 1024;
+	return raw;
+}
+
+/** Max bytes the API will load into memory (data-URL / graph / AI context). */
+export function getS3MaxInlineBytes(): number {
+	const raw = Number.parseInt(process.env.S3_MAX_INLINE_BYTES ?? String(32 * 1024 * 1024), 10);
+	if (!Number.isFinite(raw) || raw < 1) return 32 * 1024 * 1024;
+	return raw;
+}
+
+export function getS3Config(): S3Config {
+	const endpoint = getS3Endpoint();
+	const accessKeyId = getS3AccessKey();
+	const secretAccessKey = getS3SecretKey();
+	if (!endpoint || !accessKeyId || !secretAccessKey) {
+		throw new Error(
+			"S3 is not configured. Set S3_ENDPOINT, S3_ACCESS_KEY, and S3_SECRET_KEY in .env.",
+		);
+	}
+	return {
+		endpoint: endpoint.replace(/\/$/, ""),
+		region: getS3Region(),
+		bucket: getS3Bucket(),
+		accessKeyId,
+		secretAccessKey,
+		forcePathStyle: isS3ForcePathStyle(),
+		publicUrl: getS3PublicUrl()?.replace(/\/$/, "") || null,
+	};
+}

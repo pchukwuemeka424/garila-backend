@@ -13,6 +13,8 @@ import { getRepoRoot } from "./lib/paths.js";
 import { ensureSupportedNodeVersion } from "./system/node-version.js";
 import { listOutputs } from "./server/outputs.js";
 import { ChatService } from "./services/chat.service.js";
+import { assertS3Ready, s3Enabled } from "./services/s3.service.js";
+import { getS3Bucket, getS3Endpoint } from "./config/env.js";
 import { getUserById, loginUser, registerLecturer, registerStudent } from "./services/auth.service.js";
 import {
 	createUser,
@@ -33,6 +35,13 @@ import {
 	syncOutputArtifacts,
 	updateSavedResearchById,
 } from "./services/research.service.js";
+import {
+	cancelResearchJob,
+	failOrphanedResearchJobs,
+	getActiveResearchJob,
+	getResearchJobById,
+	startResearchPaperJob,
+} from "./services/research-jobs.service.js";
 import { listWorkflows } from "./services/workflows.js";
 import { fetchPapersForQuery } from "./services/alphaxiv.service.js";
 import { generateResearchOutline } from "./services/outline.service.js";
@@ -67,6 +76,8 @@ import {
 	saveResearchOutlineRecord,
 } from "./services/saved-research-outline.service.js";
 import {
+	beginDatasetDirectUpload,
+	completeDatasetDirectUpload,
 	createDataset,
 	createDocument,
 	createNote,
@@ -130,6 +141,7 @@ import {
 	updateUser as adminUpdateUser,
 } from "./services/admin-users.service.js";
 import {
+	listActiveUniversitiesForRegistration,
 	listUniversities as adminListUniversities,
 	onboardUniversity,
 	updateUniversity,
@@ -332,6 +344,7 @@ export async function startServer(port: number): Promise<void> {
 
 	const ctx = createAppContext();
 	const chat = new ChatService(ctx);
+	await failOrphanedResearchJobs();
 	const repoRoot = getRepoRoot();
 	const staticRoot = resolveStaticRoot(repoRoot);
 	const workflows = listWorkflows(ctx.backendRoot);
@@ -340,6 +353,8 @@ export async function startServer(port: number): Promise<void> {
 		logger: false,
 		// Required behind nginx / Coolify reverse proxies
 		trustProxy: true,
+		// Base64 document/dataset uploads (MinIO-backed) can exceed Fastify's 1MB default
+		bodyLimit: 25 * 1024 * 1024,
 	});
 
 	const corsOrigin = process.env.CORS_ORIGIN?.trim();
@@ -368,7 +383,27 @@ export async function startServer(port: number): Promise<void> {
 		}));
 	}
 
-	app.get("/api/health", async () => ({ ok: true, version: ctx.version }));
+	app.get("/api/health", async () => {
+		const s3: { enabled: boolean; ok: boolean | null; bucket?: string; endpoint?: string; error?: string } =
+			{ enabled: s3Enabled(), ok: null };
+		if (s3.enabled) {
+			try {
+				await assertS3Ready();
+				s3.ok = true;
+				s3.bucket = getS3Bucket();
+				s3.endpoint = getS3Endpoint() ?? undefined;
+			} catch (error) {
+				s3.ok = false;
+				s3.error = error instanceof Error ? error.message : String(error);
+			}
+		}
+		return { ok: true, version: ctx.version, s3 };
+	});
+
+	/** Public: institutions that are onboarded and allowed to self-register. */
+	app.get("/api/auth/universities", async () => ({
+		universities: await listActiveUniversitiesForRegistration(),
+	}));
 
 	app.post("/api/auth/register", async (request, reply) => {
 		const body = request.body as {
@@ -826,6 +861,63 @@ export async function startServer(port: number): Promise<void> {
 		const userId = await resolveUserId(request.headers.authorization);
 		const papers = await listSavedResearch(userId);
 		return { papers };
+	});
+
+	app.post("/api/research/jobs", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
+		const body = request.body as { prompt?: string; topic?: string };
+		if (!body.prompt?.trim()) {
+			return reply.code(400).send({ error: "Prompt is required." });
+		}
+		try {
+			const job = await startResearchPaperJob({
+				ctx,
+				userId,
+				prompt: body.prompt,
+				topic: body.topic,
+			});
+			return { job };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const conflict = message.includes("already generating");
+			return reply.code(conflict ? 409 : 400).send({ error: message });
+		}
+	});
+
+	app.get("/api/research/jobs/active", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
+		const job = await getActiveResearchJob(userId);
+		return { job };
+	});
+
+	app.get<{ Params: { id: string } }>("/api/research/jobs/:id", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
+		const job = await getResearchJobById(request.params.id, userId);
+		if (!job) {
+			return reply.code(404).send({ error: "Research job not found." });
+		}
+		return { job };
+	});
+
+	app.post<{ Params: { id: string } }>("/api/research/jobs/:id/cancel", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
+		const job = await cancelResearchJob(request.params.id, userId);
+		if (!job) {
+			return reply.code(404).send({ error: "Research job not found." });
+		}
+		return { job };
 	});
 
 	app.get<{ Params: { id: string } }>("/api/research/saved/:id", async (request, reply) => {
@@ -1517,6 +1609,56 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(status).send({ error: message });
 		}
 	});
+
+	/** Direct-to-MinIO upload session (supports up to S3_MAX_UPLOAD_BYTES, default 2 GiB). */
+	app.post("/api/research/datasets/upload-session", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) return reply.code(401).send({ error: "Authentication required." });
+		const body = request.body as {
+			projectId?: string;
+			title?: string;
+			description?: string;
+			discipline?: string;
+			format?: string;
+			year?: string;
+			license?: string;
+			accessUrl?: string;
+			sizeLabel?: string;
+			tags?: string[];
+			visibility?: "private" | "shared";
+			fileName?: string;
+			fileMime?: string;
+			fileSizeBytes?: number;
+		};
+		try {
+			const session = await beginDatasetDirectUpload(userId, body);
+			return session;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const status = message.includes("Sign in") ? 401 : 400;
+			return reply.code(status).send({ error: message });
+		}
+	});
+
+	app.post<{ Params: { id: string } }>(
+		"/api/research/datasets/:id/complete-upload",
+		async (request, reply) => {
+			const userId = await resolveUserId(request.headers.authorization);
+			if (!userId) return reply.code(401).send({ error: "Authentication required." });
+			try {
+				const dataset = await completeDatasetDirectUpload(request.params.id, userId);
+				return { dataset };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const status = message.includes("Sign in")
+					? 401
+					: message.includes("not found")
+						? 404
+						: 400;
+				return reply.code(status).send({ error: message });
+			}
+		},
+	);
 
 	app.get<{ Params: { id: string } }>("/api/research/datasets/:id", async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);

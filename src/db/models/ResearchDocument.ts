@@ -8,6 +8,7 @@ const researchDocumentSchema = new Schema(
 		fileName: { type: String, required: true, trim: true },
 		fileMime: { type: String, default: "application/octet-stream", trim: true },
 		fileData: { type: String, default: "" },
+		storageKey: { type: String, default: "", trim: true, index: true },
 		sizeLabel: { type: String, default: "", trim: true },
 		kind: {
 			type: String,

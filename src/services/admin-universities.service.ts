@@ -107,39 +107,26 @@ export async function isUniversityActive(universityId: string | Types.ObjectId |
 	return uni?.status === "active";
 }
 
-/** Find by catalogue id, or create an inactive university stub for registration. */
-export async function ensureUniversityFromCatalogue(input: {
-	catalogueId: string;
-	name: string;
-}) {
-	const catalogueId = input.catalogueId.trim().toLowerCase();
-	const name = input.name.trim();
-	if (!catalogueId) throw new Error("Please select your institution.");
-	if (name.length < 2) throw new Error("Please select your institution.");
+/** Active (onboarded) university for public registration — never creates stubs. */
+export async function getActiveUniversityByCatalogueId(catalogueId: string) {
+	const id = catalogueId.trim().toLowerCase();
+	if (!id) return null;
+	const uni = await UniversityModel.findOne({ catalogueId: id, status: "active" });
+	return uni;
+}
 
-	const existing = await UniversityModel.findOne({ catalogueId });
-	if (existing) return existing;
-
-	const baseSlug = slugify(catalogueId) || slugify(name) || "university";
-	let slug = baseSlug;
-	let attempt = 0;
-	while (await UniversityModel.exists({ slug })) {
-		attempt += 1;
-		slug = `${baseSlug}-${attempt}`;
-	}
-
-	try {
-		return await UniversityModel.create({
-			catalogueId,
-			name,
-			slug,
-			status: "inactive",
-		});
-	} catch {
-		const raced = await UniversityModel.findOne({ catalogueId });
-		if (raced) return raced;
-		throw new Error("Could not resolve institution.");
-	}
+/** Public catalogue for /register — only onboarded universities. */
+export async function listActiveUniversitiesForRegistration(): Promise<
+	Array<{ catalogueId: string; name: string }>
+> {
+	const docs = await UniversityModel.find({ status: "active" })
+		.select("catalogueId name")
+		.sort({ name: 1 })
+		.lean();
+	return docs.map((doc) => ({
+		catalogueId: doc.catalogueId,
+		name: doc.name,
+	}));
 }
 
 export async function onboardUniversity(input: {

@@ -4,7 +4,10 @@ import { buildTokenQuota, type StudentTokenQuota } from "../constants/student-to
 import { UserModel, type UserDocument } from "../db/models/User.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
 import { signAuthToken } from "../lib/auth-token.js";
-import { ensureUniversityFromCatalogue, isUniversityActive } from "./admin-universities.service.js";
+import {
+	getActiveUniversityByCatalogueId,
+	isUniversityActive,
+} from "./admin-universities.service.js";
 
 export type PublicUser = {
 	id: string;
@@ -67,12 +70,12 @@ async function resolveRegistrationUniversity(input: {
 	institution?: string;
 }) {
 	const catalogueId = input.catalogueId?.trim();
-	const institution = input.institution?.trim() ?? "";
 	if (!catalogueId) throw new Error("Please select your institution.");
-	const university = await ensureUniversityFromCatalogue({
-		catalogueId,
-		name: institution || catalogueId,
-	});
+
+	// Gate before any user write: only onboarded (active) universities may register.
+	const university = await getActiveUniversityByCatalogueId(catalogueId);
+	if (!university) throw new Error(UNIVERSITY_NOT_ONBOARDED);
+
 	return {
 		universityId: university._id,
 		institution: university.name,

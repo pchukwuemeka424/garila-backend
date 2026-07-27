@@ -16,6 +16,8 @@ const researchDatasetSchema = new Schema(
 		fileName: { type: String, default: "" },
 		fileMime: { type: String, default: "" },
 		fileData: { type: String, default: "" },
+		storageKey: { type: String, default: "", trim: true, index: true },
+		fileSizeBytes: { type: Number, default: 0 },
 		visibility: { type: String, enum: ["private", "shared"], default: "private" },
 	},
 	{ timestamps: true },

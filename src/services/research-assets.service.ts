@@ -11,8 +11,18 @@ import {
 	mergeSectionsWithTemplate,
 	type ResearchProjectType,
 } from "../lib/research-project-types.js";
-
-const MAX_ATTACHMENT_CHARS = 2_500_000;
+import {
+	assertObjectUploaded,
+	createDirectUploadTarget,
+	deleteStoredAttachment,
+	formatByteLabel,
+	hasStoredAttachment,
+	loadAttachmentDataUrl,
+	maxDirectUploadBytes,
+	storeAttachment,
+} from "./attachment-storage.service.js";
+import { getPresignedGetUrl, s3Enabled } from "./s3.service.js";
+import { isS3Enabled } from "../config/env.js";
 
 export type ResearchDatasetDto = {
 	id: string;
@@ -35,20 +45,14 @@ export type ResearchDatasetDto = {
 export type AttachmentPayload = {
 	name: string;
 	mime: string;
-	data: string;
+	data?: string;
+	downloadUrl?: string;
+	sizeBytes?: number;
 };
 
 function requireUserId(userId?: string | null): string {
 	if (!userId) throw new Error("Sign in to manage research assets.");
 	return userId;
-}
-
-function clampAttachment(data?: string): string {
-	const value = data?.trim() ?? "";
-	if (value.length > MAX_ATTACHMENT_CHARS) {
-		throw new Error("Attachment is too large. Please upload a smaller file.");
-	}
-	return value;
 }
 
 function parseObjectId(id?: string | null): Types.ObjectId | null {
@@ -77,6 +81,7 @@ function toDatasetDto(doc: {
 	visibility?: "private" | "shared" | null;
 	fileName?: string | null;
 	fileData?: string | null;
+	storageKey?: string | null;
 	createdAt: Date;
 	updatedAt: Date;
 }): ResearchDatasetDto {
@@ -92,7 +97,7 @@ function toDatasetDto(doc: {
 		sizeLabel: doc.sizeLabel ?? "",
 		tags: doc.tags ?? [],
 		visibility: doc.visibility === "shared" ? "shared" : "private",
-		hasFile: Boolean(doc.fileData?.trim()),
+		hasFile: hasStoredAttachment(doc),
 		fileName: doc.fileName ?? "",
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
@@ -226,6 +231,7 @@ function toDocumentDto(doc: {
 	sizeLabel?: string | null;
 	kind?: "doc" | "pdf" | "sheet" | "other" | null;
 	fileData?: string | null;
+	storageKey?: string | null;
 	createdAt: Date;
 	updatedAt: Date;
 }): ResearchDocumentDto {
@@ -236,7 +242,7 @@ function toDocumentDto(doc: {
 		fileMime: doc.fileMime ?? "application/octet-stream",
 		sizeLabel: doc.sizeLabel ?? "",
 		kind: doc.kind ?? "other",
-		hasFile: Boolean(doc.fileData?.trim()),
+		hasFile: hasStoredAttachment(doc),
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
 	};
@@ -597,17 +603,39 @@ export async function createDataset(
 ): Promise<ResearchDatasetDto> {
 	const uid = requireUserId(userId);
 	const title = input.title?.trim() ?? "";
-	const fileData = clampAttachment(input.fileData);
 	const accessUrl = input.accessUrl?.trim() ?? "";
-	const fileName = fileData ? (input.fileName?.trim() ?? "dataset") : "";
+	const rawFile = input.fileData?.trim() ?? "";
+	const fileName = rawFile ? (input.fileName?.trim() ?? "dataset") : "";
 	const description =
 		input.description?.trim() ||
 		(fileName ? `Uploaded ${fileName}` : accessUrl ? `Dataset linked from ${accessUrl}` : "");
 	if (!title) throw new Error("Title is required.");
-	if (!fileData && !accessUrl) throw new Error("Upload a file or provide an access URL.");
+	if (!rawFile && !accessUrl) throw new Error("Upload a file or provide an access URL.");
 
 	const projectObjectId = await resolveProjectObjectId(uid, input.projectId);
+	const datasetId = new Types.ObjectId();
+	let storageKey = "";
+	let fileData = "";
+	let fileMime = "";
+	let storedBytes = 0;
+
+	if (rawFile) {
+		const stored = await storeAttachment({
+			userId: uid,
+			kind: "datasets",
+			id: datasetId.toString(),
+			fileName,
+			fileMime: input.fileMime,
+			fileData: rawFile,
+		});
+		storageKey = stored.storageKey;
+		fileData = stored.fileData;
+		fileMime = stored.mime;
+		storedBytes = stored.byteLength;
+	}
+
 	const created = await ResearchDatasetModel.create({
+		_id: datasetId,
 		userId: new Types.ObjectId(uid),
 		projectId: projectObjectId,
 		title,
@@ -617,12 +645,14 @@ export async function createDataset(
 		year: input.year?.trim() ?? "",
 		license: input.license?.trim() ?? "",
 		accessUrl,
-		sizeLabel: input.sizeLabel?.trim() ?? "",
+		sizeLabel: input.sizeLabel?.trim() || (storedBytes ? formatBytes(storedBytes) : ""),
 		tags: (input.tags ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 20),
 		visibility: input.visibility === "shared" ? "shared" : "private",
 		fileName,
-		fileMime: fileData ? (input.fileMime?.trim() || "application/octet-stream") : "",
+		fileMime,
 		fileData,
+		storageKey,
+		fileSizeBytes: storedBytes,
 	});
 	await touchProject(uid, projectObjectId.toString());
 	return toDatasetDto(created);
@@ -652,12 +682,133 @@ export async function getDatasetFile(
 		_id: id,
 		userId: new Types.ObjectId(uid),
 	});
-	if (!doc?.fileData?.trim()) return null;
+	if (!doc || !hasStoredAttachment(doc)) return null;
+	const name = doc.fileName || "dataset";
+	const mime = doc.fileMime || "application/octet-stream";
+	const sizeBytes = typeof doc.fileSizeBytes === "number" ? doc.fileSizeBytes : 0;
+
+	// Large MinIO objects: return a time-limited download URL instead of base64.
+	if (doc.storageKey?.trim() && isS3Enabled()) {
+		try {
+			const data = await loadAttachmentDataUrl(doc);
+			if (data) {
+				return { name, mime, data, sizeBytes: sizeBytes || undefined };
+			}
+		} catch {
+			const downloadUrl = await getPresignedGetUrl(doc.storageKey, 3600);
+			return { name, mime, downloadUrl, sizeBytes: sizeBytes || undefined };
+		}
+	}
+
+	const data = await loadAttachmentDataUrl(doc);
+	if (!data) return null;
+	return { name, mime, data, sizeBytes: sizeBytes || undefined };
+}
+
+export async function beginDatasetDirectUpload(
+	userId: string | null | undefined,
+	input: {
+		projectId?: string;
+		title?: string;
+		description?: string;
+		discipline?: string;
+		format?: string;
+		year?: string;
+		license?: string;
+		accessUrl?: string;
+		sizeLabel?: string;
+		tags?: string[];
+		visibility?: "private" | "shared";
+		fileName?: string;
+		fileMime?: string;
+		fileSizeBytes?: number;
+	},
+): Promise<{
+	dataset: ResearchDatasetDto;
+	uploadUrl: string;
+	storageKey: string;
+	expiresInSeconds: number;
+	maxBytes: number;
+}> {
+	const uid = requireUserId(userId);
+	if (!s3Enabled()) {
+		throw new Error("Direct uploads require MinIO/S3 to be configured.");
+	}
+	const title = input.title?.trim() ?? "";
+	const fileName = input.fileName?.trim() || "dataset";
+	const fileSizeBytes = Number(input.fileSizeBytes ?? 0);
+	if (!title) throw new Error("Title is required.");
+	if (!fileName) throw new Error("A file is required.");
+	if (!Number.isFinite(fileSizeBytes) || fileSizeBytes < 1) {
+		throw new Error("fileSizeBytes is required.");
+	}
+
+	const projectObjectId = await resolveProjectObjectId(uid, input.projectId);
+	const datasetId = new Types.ObjectId();
+	const target = await createDirectUploadTarget({
+		userId: uid,
+		kind: "datasets",
+		id: datasetId.toString(),
+		fileName,
+		fileMime: input.fileMime,
+		fileSizeBytes,
+	});
+
+	const description =
+		input.description?.trim() || `Uploaded ${fileName}`;
+	const created = await ResearchDatasetModel.create({
+		_id: datasetId,
+		userId: new Types.ObjectId(uid),
+		projectId: projectObjectId,
+		title,
+		description,
+		discipline: input.discipline?.trim() ?? "",
+		format: input.format?.trim() || "other",
+		year: input.year?.trim() ?? "",
+		license: input.license?.trim() ?? "",
+		accessUrl: input.accessUrl?.trim() ?? "",
+		sizeLabel: input.sizeLabel?.trim() || formatByteLabel(fileSizeBytes),
+		tags: (input.tags ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 20),
+		visibility: input.visibility === "shared" ? "shared" : "private",
+		fileName,
+		fileMime: target.mime,
+		fileData: "",
+		storageKey: target.storageKey,
+		fileSizeBytes,
+	});
+	await touchProject(uid, projectObjectId.toString());
 	return {
-		name: doc.fileName || "dataset",
-		mime: doc.fileMime || "application/octet-stream",
-		data: doc.fileData,
+		dataset: toDatasetDto(created),
+		uploadUrl: target.uploadUrl,
+		storageKey: target.storageKey,
+		expiresInSeconds: target.expiresInSeconds,
+		maxBytes: maxDirectUploadBytes(),
 	};
+}
+
+export async function completeDatasetDirectUpload(
+	id: string,
+	userId?: string | null,
+): Promise<ResearchDatasetDto> {
+	const uid = requireUserId(userId);
+	if (!Types.ObjectId.isValid(id)) throw new Error("Dataset not found.");
+	const doc = await ResearchDatasetModel.findOne({
+		_id: id,
+		userId: new Types.ObjectId(uid),
+	});
+	if (!doc) throw new Error("Dataset not found.");
+	if (!doc.storageKey?.trim()) {
+		throw new Error("This dataset has no pending MinIO upload.");
+	}
+	const meta = await assertObjectUploaded(doc.storageKey, 1);
+	doc.fileSizeBytes = meta.contentLength;
+	if (meta.contentType) doc.fileMime = meta.contentType;
+	doc.sizeLabel = formatByteLabel(meta.contentLength);
+	doc.fileData = "";
+	await doc.save();
+	const pid = projectIdString(doc.projectId);
+	if (pid) await touchProject(uid, pid);
+	return toDatasetDto(doc);
 }
 
 export async function deleteDataset(id: string, userId?: string | null): Promise<boolean> {
@@ -668,6 +819,7 @@ export async function deleteDataset(id: string, userId?: string | null): Promise
 		userId: new Types.ObjectId(uid),
 	});
 	if (!doc) return false;
+	await deleteStoredAttachment(doc.storageKey);
 	await doc.deleteOne();
 	const pid = projectIdString(doc.projectId);
 	if (pid) await touchProject(uid, pid);
@@ -701,20 +853,30 @@ export async function createDocument(
 	const fileName = input.fileName?.trim() || input.title?.trim() || "";
 	const title = input.title?.trim() || fileName || "Untitled document";
 	if (!fileName) throw new Error("A file is required.");
-	const fileData = clampAttachment(input.fileData);
-	if (!fileData) throw new Error("A file is required.");
-	const fileMime = input.fileMime?.trim() || "application/octet-stream";
-	const approxBytes = Math.max(0, Math.round((fileData.length * 3) / 4));
+	if (!input.fileData?.trim()) throw new Error("A file is required.");
+
 	const projectObjectId = await resolveProjectObjectId(uid, input.projectId);
+	const documentId = new Types.ObjectId();
+	const stored = await storeAttachment({
+		userId: uid,
+		kind: "documents",
+		id: documentId.toString(),
+		fileName,
+		fileMime: input.fileMime,
+		fileData: input.fileData,
+	});
+
 	const created = await ResearchDocumentModel.create({
+		_id: documentId,
 		userId: new Types.ObjectId(uid),
 		projectId: projectObjectId,
 		title,
 		fileName,
-		fileMime,
-		fileData,
-		sizeLabel: input.sizeLabel?.trim() || formatBytes(approxBytes),
-		kind: inferDocKind(fileName, fileMime),
+		fileMime: stored.mime,
+		fileData: stored.fileData,
+		storageKey: stored.storageKey,
+		sizeLabel: input.sizeLabel?.trim() || formatBytes(stored.byteLength),
+		kind: inferDocKind(fileName, stored.mime),
 	});
 	await touchProject(uid, projectObjectId.toString());
 	return toDocumentDto(created);
@@ -730,11 +892,13 @@ export async function getDocumentFile(
 		_id: id,
 		userId: new Types.ObjectId(uid),
 	});
-	if (!doc?.fileData?.trim()) return null;
+	if (!doc || !hasStoredAttachment(doc)) return null;
+	const data = await loadAttachmentDataUrl(doc);
+	if (!data) return null;
 	return {
 		name: doc.fileName || "document",
 		mime: doc.fileMime || "application/octet-stream",
-		data: doc.fileData,
+		data,
 	};
 }
 
@@ -746,6 +910,7 @@ export async function deleteDocument(id: string, userId?: string | null): Promis
 		userId: new Types.ObjectId(uid),
 	});
 	if (!doc) return false;
+	await deleteStoredAttachment(doc.storageKey);
 	await doc.deleteOne();
 	const pid = projectIdString(doc.projectId);
 	if (pid) await touchProject(uid, pid);

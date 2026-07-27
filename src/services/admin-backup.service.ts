@@ -21,6 +21,8 @@ import { SavedResearchOutlineModel } from "../db/models/SavedResearchOutline.js"
 import { SessionModel } from "../db/models/Session.js";
 import { UserModel } from "../db/models/User.js";
 import { getBackendRoot } from "../lib/paths.js";
+import { isS3Enabled } from "../config/env.js";
+import { putObject } from "./s3.service.js";
 
 export type BackupTableInfo = {
 	key: string;
@@ -175,6 +177,15 @@ export async function createDatabaseBackup(): Promise<BackupFileInfo> {
 	};
 
 	writeFileSync(filepath, JSON.stringify(payload, null, 2), "utf8");
+
+	if (isS3Enabled()) {
+		const body = readFileSync(filepath);
+		await putObject({
+			key: `backups/${filename}`,
+			body,
+			contentType: "application/json",
+		});
+	}
 
 	const stats = statSync(filepath);
 	return {

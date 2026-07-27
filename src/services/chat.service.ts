@@ -30,9 +30,14 @@ export class ChatService {
 	private state: ChatState = "idle";
 	private lastError: string | null = null;
 	private abortController: AbortController | null = null;
+	private lastSavedResearchId: string | null = null;
 	private readonly subscribers = new Set<Subscriber>();
 
 	constructor(private readonly ctx: AppContext) {}
+
+	getLastSavedResearchId(): string | null {
+		return this.lastSavedResearchId;
+	}
 
 	subscribe(listener: Subscriber): () => void {
 		this.subscribers.add(listener);
@@ -74,6 +79,7 @@ export class ChatService {
 		userId?: string;
 	}): Promise<void> {
 		await this.abort();
+		this.lastSavedResearchId = null;
 		this.setState("starting");
 
 		const workflow = options?.workflow?.replace(/^\//, "");
@@ -356,7 +362,7 @@ export class ChatService {
 		if (!topic) return;
 
 		try {
-			await saveResearchPaper({
+			const saved = await saveResearchPaper({
 				userId: userId ?? null,
 				sessionId: this.sessionId.toString(),
 				topic,
@@ -364,6 +370,7 @@ export class ChatService {
 				workflow: "chat-paper",
 				tokenUsage: usage,
 			});
+			this.lastSavedResearchId = saved.id;
 		} catch {
 			/* persistence must not break chat */
 		}

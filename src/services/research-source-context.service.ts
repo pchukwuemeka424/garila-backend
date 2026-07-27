@@ -8,6 +8,10 @@ import { ResearchDocumentModel } from "../db/models/ResearchDocument.js";
 import { ResearchNoteModel } from "../db/models/ResearchNote.js";
 import { ResearchProjectModel } from "../db/models/ResearchProject.js";
 import { ResearchReferenceModel } from "../db/models/ResearchReference.js";
+import {
+	hasStoredAttachment,
+	loadAttachmentDataUrl,
+} from "./attachment-storage.service.js";
 
 const MAX_IDS_PER_KIND = 5;
 const MAX_SOURCE_CHARS = 14_000;
@@ -272,12 +276,17 @@ async function buildProjectContext(
 	}
 
 	for (const document of documents) {
-		if (!document.fileData?.trim()) {
+		if (!hasStoredAttachment(document)) {
 			chunks.push(`Document — ${document.title} (${document.fileName})`);
 			continue;
 		}
 		try {
-			const text = await extractFileText(document.fileName, document.fileMime, document.fileData);
+			const fileData = await loadAttachmentDataUrl(document);
+			if (!fileData) {
+				chunks.push(`Document — ${document.title} (${document.fileName})`);
+				continue;
+			}
+			const text = await extractFileText(document.fileName, document.fileMime, fileData);
 			if (text) chunks.push(`Document — ${document.title}\n${text}`);
 		} catch {
 			chunks.push(`Document — ${document.title}\n[The uploaded file could not be parsed.]`);
@@ -292,9 +301,12 @@ async function buildProjectContext(
 			.filter(Boolean)
 			.join("\n");
 		let text = "";
-		if (dataset.fileData?.trim()) {
+		if (hasStoredAttachment(dataset)) {
 			try {
-				text = await extractFileText(dataset.fileName, dataset.fileMime, dataset.fileData);
+				const fileData = await loadAttachmentDataUrl(dataset);
+				if (fileData) {
+					text = await extractFileText(dataset.fileName, dataset.fileMime, fileData);
+				}
 			} catch {
 				text = "[The uploaded dataset could not be parsed.]";
 			}
@@ -338,9 +350,11 @@ export async function buildResearchSourceContext(
 		if (text) sections.push(text);
 	}
 	for (const document of documents) {
-		if (!document.fileData?.trim()) continue;
+		if (!hasStoredAttachment(document)) continue;
 		try {
-			const text = await extractFileText(document.fileName, document.fileMime, document.fileData);
+			const fileData = await loadAttachmentDataUrl(document);
+			if (!fileData) continue;
+			const text = await extractFileText(document.fileName, document.fileMime, fileData);
 			if (text) sections.push(`DOCUMENT: ${document.title}\n${text}`);
 		} catch {
 			sections.push(`DOCUMENT: ${document.title}\n[The uploaded file could not be parsed.]`);
@@ -355,9 +369,12 @@ export async function buildResearchSourceContext(
 			.filter(Boolean)
 			.join("\n");
 		let text = "";
-		if (dataset.fileData?.trim()) {
+		if (hasStoredAttachment(dataset)) {
 			try {
-				text = await extractFileText(dataset.fileName, dataset.fileMime, dataset.fileData);
+				const fileData = await loadAttachmentDataUrl(dataset);
+				if (fileData) {
+					text = await extractFileText(dataset.fileName, dataset.fileMime, fileData);
+				}
 			} catch {
 				text = "[The uploaded dataset could not be parsed.]";
 			}

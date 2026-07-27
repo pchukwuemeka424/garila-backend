@@ -3,6 +3,10 @@ import { Types } from "mongoose";
 import { getOpenRouterFastModel } from "../config/env.js";
 import { ResearchDatasetModel } from "../db/models/ResearchDataset.js";
 import { ResearchProjectModel } from "../db/models/ResearchProject.js";
+import {
+	hasStoredAttachment,
+	loadAttachmentDataUrl,
+} from "./attachment-storage.service.js";
 import { completeOpenRouterChat } from "./llm.service.js";
 
 export type GraphChartType = "bar" | "line" | "area" | "pie" | "scatter";
@@ -810,11 +814,15 @@ export async function plotDatasetGraph(
 		userId: new Types.ObjectId(uid),
 	});
 	if (!doc) throw new Error("Dataset not found.");
-	if (!doc.fileData?.trim()) {
+	if (!hasStoredAttachment(doc)) {
 		throw new Error("This dataset has no uploaded file. Upload a CSV, TSV, or JSON file first.");
 	}
 
-	const raw = decodeDataUrl(doc.fileData);
+	const fileData = await loadAttachmentDataUrl(doc);
+	if (!fileData) {
+		throw new Error("This dataset has no uploaded file. Upload a CSV, TSV, or JSON file first.");
+	}
+	const raw = decodeDataUrl(fileData);
 	const format = (doc.format || doc.fileName.split(".").pop() || "").toLowerCase();
 	const parsed =
 		format === "json" || raw.trim().startsWith("[") || raw.trim().startsWith("{")
