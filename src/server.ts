@@ -37,9 +37,9 @@ import {
 } from "./services/research.service.js";
 import {
 	cancelResearchJob,
+	failOrphanedResearchJobs,
 	getActiveResearchJob,
 	getResearchJobById,
-	requeueOrphanedResearchJobs,
 	startResearchPaperJob,
 } from "./services/research-jobs.service.js";
 import { listWorkflows } from "./services/workflows.js";
@@ -374,7 +374,7 @@ export async function startServer(port: number): Promise<void> {
 
 	const ctx = createAppContext();
 	const chat = new ChatService(ctx);
-	await requeueOrphanedResearchJobs(ctx);
+	await failOrphanedResearchJobs();
 	const repoRoot = getRepoRoot();
 	const staticRoot = resolveStaticRoot(repoRoot);
 	const workflows = listWorkflows(ctx.backendRoot);

@@ -7,6 +7,8 @@ import {
 } from "../config/env.js";
 import { searchArxivPapers } from "./arxiv.service.js";
 import {
+	libraryHasEnoughHits,
+	mergeUniquePapers,
 	searchPaperLibrary,
 	upsertPapersIntoLibrary,
 } from "./paper-library.service.js";
@@ -36,312 +38,8 @@ type RawSearchPaper = {
 	topics?: string[];
 };
 
-/** Enough papers for chat-paper section citation floors without inventing sources. */
-const DEFAULT_LIMIT = 25;
+const DEFAULT_LIMIT = 8;
 const REQUEST_TIMEOUT_MS = 20_000;
-
-/** Structured literature entry for bank-only in-text ↔ References matching. */
-export type CitationBankEntry = {
-	/** Normalized lookup key: `surname|year` (year may include a/b disambiguation). */
-	citeKey: string;
-	surname: string;
-	year: string;
-	authors: string[];
-	title: string;
-	url: string;
-	authorLine: string;
-	/** Exact APA-style line for the References section. */
-	referenceLine: string;
-	/** Canonical parenthetical cite, e.g. `(Smith, 2020)`. */
-	inTextParen: string;
-	/** Truncated abstract used for paraphrase grounding (empty if unavailable). */
-	abstract: string;
-};
-
-const MIN_ABSTRACT_CHARS = 40;
-const SEARCH_QUERY_MAX_CHARS = 160;
-
-/**
- * Build a compact scholarly search query from a topic or mega paper prompt.
- * Strips outline/boilerplate so literature APIs get usable terms.
- */
-export function buildScholarlySearchQuery(raw: string): string {
-	let text = raw.replace(/\r/g, "").trim();
-	if (!text) return "";
-
-	// Prefer an explicit idea/title line when present.
-	const titleMatch =
-		text.match(/^\*\*([^*]{8,120})\*\*\s*$/m) ||
-		text.match(/^Title:\s*(.+)$/im) ||
-		text.match(/^Research (?:idea|topic|question):\s*(.+)$/im) ||
-		text.match(/^Suggested (?:interest )?topic:\s*(.+)$/im);
-	if (titleMatch?.[1]) {
-		text = titleMatch[1].replace(/\*\*/g, "").trim();
-	}
-
-	// Drop common prompt scaffolding that pollutes search.
-	text = text
-		.replace(/\*\*Approved research outline\*\*[\s\S]*$/i, " ")
-		.replace(/\*\*Selected user evidence\*\*[\s\S]*$/i, " ")
-		.replace(/\*\*Study framing[\s\S]*?\*\*/gi, " ")
-		.replace(/Reference style:.*$/gim, " ")
-		.replace(/Discipline:\s*/gi, " ")
-		.replace(/Scope:\s*/gi, " ")
-		.replace(/Write a complete academic research paper[\s\S]{0,400}/gi, " ")
-		.replace(/In-text citation floors[\s\S]{0,300}/gi, " ")
-		.replace(/Cite ONLY papers[\s\S]{0,200}/gi, " ")
-		.replace(/```[\s\S]*?```/g, " ")
-		.replace(/\[[^\]]*\]\([^)]+\)/g, " ")
-		.replace(/[#*_`>|]/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-
-	if (text.length > SEARCH_QUERY_MAX_CHARS) {
-		text = text.slice(0, SEARCH_QUERY_MAX_CHARS).replace(/\s+\S*$/, "").trim();
-	}
-	return text;
-}
-
-function truncateAbstract(abstract: string, max = 600): string {
-	return abstract.replace(/\s+/g, " ").trim().slice(0, max);
-}
-
-function hasUsableAbstract(paper: AlphaXivPaper): boolean {
-	return truncateAbstract(paper.abstract).length >= MIN_ABSTRACT_CHARS;
-}
-
-/** True when the first author yields a real surname (not Unknown / empty). */
-function hasUsableAuthor(paper: AlphaXivPaper): boolean {
-	const authors = paper.authors.filter((a) => a?.trim());
-	if (authors.length === 0) return false;
-	const surname = authorSurname(authors[0]!).toLowerCase();
-	return surname.length >= 2 && surname !== "unknown";
-}
-
-/** True when publication date parses to a real year (not n.d.). */
-function hasUsableYear(paper: AlphaXivPaper): boolean {
-	return paperYear(paper) !== "n.d.";
-}
-
-/**
- * Cite-eligible papers need abstract + real author + real year.
- * Incomplete hits (common from Tavily) must not enter the bank as (Unknown, n.d.).
- */
-export function filterCiteEligiblePapers(papers: AlphaXivPaper[]): AlphaXivPaper[] {
-	const citeable = papers.filter(
-		(p) => hasUsableAbstract(p) && hasUsableAuthor(p) && hasUsableYear(p),
-	);
-	if (citeable.length > 0) return citeable;
-
-	// Soft fallback: keep author+year even if abstract is thin — still never Unknown/n.d.
-	const withIdentity = papers.filter((p) => hasUsableAuthor(p) && hasUsableYear(p));
-	return withIdentity;
-}
-
-function paperDedupeKey(paper: AlphaXivPaper): string {
-	if (paper.arxivId) return `arxiv:${paper.arxivId.toLowerCase()}`;
-	return `title:${paper.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`;
-}
-
-function scorePaperForQuery(paper: AlphaXivPaper, query: string): number {
-	const q = query.toLowerCase();
-	const terms = q.split(/\s+/).filter((t) => t.length > 2);
-	const title = paper.title.toLowerCase();
-	const abstract = paper.abstract.toLowerCase();
-	let score = 0;
-	for (const term of terms) {
-		if (title.includes(term)) score += 3;
-		if (abstract.includes(term)) score += 1;
-	}
-	const absLen = truncateAbstract(paper.abstract).length;
-	if (absLen >= 200) score += 4;
-	else if (absLen >= MIN_ABSTRACT_CHARS) score += 2;
-	else score -= 5;
-
-	if (!hasUsableAuthor(paper)) score -= 20;
-	if (!hasUsableYear(paper)) score -= 15;
-
-	if (paper.publicationDate) {
-		const year = new Date(paper.publicationDate).getFullYear();
-		if (Number.isFinite(year)) {
-			score += Math.max(0, Math.min(6, year - 2018));
-		}
-	}
-	return score;
-}
-
-/** Merge, dedupe, rank by relevance/abstract substance/recency, then keep top N. */
-export function mergeRankPapers(
-	batches: AlphaXivPaper[][],
-	query: string,
-	limit: number,
-): AlphaXivPaper[] {
-	const seen = new Set<string>();
-	const merged: AlphaXivPaper[] = [];
-	for (const batch of batches) {
-		for (const paper of batch) {
-			const key = paperDedupeKey(paper);
-			if (seen.has(key)) continue;
-			seen.add(key);
-			merged.push(paper);
-		}
-	}
-	merged.sort((a, b) => scorePaperForQuery(b, query) - scorePaperForQuery(a, query));
-	return filterCiteEligiblePapers(merged).slice(0, limit);
-}
-
-/**
- * Deterministic evidence cards: 2–4 paraphraseable claim bullets per bank paper.
- * Writers must paraphrase these cards rather than invent literature claims.
- */
-export function buildEvidenceCardsFromBank(bank: CitationBankEntry[]): string {
-	if (!bank.length) return "";
-
-	const cards = bank.map((entry) => {
-		const abstract = truncateAbstract(entry.abstract || "", 600);
-		const sentences = abstract
-			? abstract
-					.split(/(?<=[.!?])\s+/)
-					.map((s) => s.trim())
-					.filter((s) => s.length >= 28)
-					.slice(0, 4)
-			: [];
-		const claims =
-			sentences.length > 0
-				? sentences.map((s) => `- Claim: ${s}`)
-				: [`- Claim: ${entry.title} (title only — paraphrase cautiously; abstract unavailable).`];
-		return [`### ${entry.inTextParen}`, ...claims, `Allowed cite: ${entry.inTextParen}`].join(
-			"\n",
-		);
-	});
-
-	return [
-		"## Evidence cards (paraphrase ONLY these — cite with the Allowed cite key)",
-		"Every literature claim with an in-text citation must paraphrase or synthesize the matching card.",
-		"Do not invent findings, statistics, or methods not supported by the card/abstract.",
-		"",
-		...cards,
-	].join("\n");
-}
-
-/** Extract a usable surname from an author display name. */
-export function authorSurname(author: string): string {
-	const cleaned = author
-		.replace(/\s+/g, " ")
-		.replace(/,+/g, ",")
-		.trim();
-	if (!cleaned) return "Unknown";
-
-	// "Last, First" or "Last, F."
-	if (cleaned.includes(",")) {
-		const last = cleaned.split(",")[0]?.trim();
-		if (last) return last.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-]/g, "") || "Unknown";
-	}
-
-	const parts = cleaned.split(" ").filter(Boolean);
-	const last = parts[parts.length - 1] ?? cleaned;
-	return last.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-]/g, "") || "Unknown";
-}
-
-function paperYear(paper: AlphaXivPaper): string {
-	if (!paper.publicationDate) return "n.d.";
-	const y = new Date(paper.publicationDate).getFullYear();
-	return Number.isFinite(y) ? String(y) : "n.d.";
-}
-
-function formatApaAuthor(author: string): string {
-	const cleaned = author.replace(/\s+/g, " ").replace(/,+/g, ",").trim();
-	if (!cleaned) return "Unknown";
-
-	if (cleaned.includes(",")) {
-		const [lastRaw, ...rest] = cleaned.split(",").map((s) => s.trim());
-		const last = (lastRaw ?? "Unknown").replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-\s]/g, "").trim() || "Unknown";
-		const first = rest.join(" ").trim();
-		const initials = first
-			.split(/\s+/)
-			.filter(Boolean)
-			.map((part) => `${part[0]!.toUpperCase()}.`)
-			.join(" ");
-		return initials ? `${last}, ${initials}` : last;
-	}
-
-	const parts = cleaned.split(" ").filter(Boolean);
-	if (parts.length === 1) return parts[0]!;
-	const last = parts[parts.length - 1]!;
-	const initials = parts
-		.slice(0, -1)
-		.map((part) => `${part[0]!.toUpperCase()}.`)
-		.join(" ");
-	return `${last}, ${initials}`;
-}
-
-/** APA 7 reference-list author string (up to 20 names). */
-function formatAuthorLine(authors: string[]): string {
-	if (authors.length === 0) return "Unknown";
-	const formatted = authors.slice(0, 20).map(formatApaAuthor);
-	if (formatted.length === 1) return formatted[0]!;
-	if (formatted.length === 2) return `${formatted[0]}, & ${formatted[1]}`;
-	return `${formatted.slice(0, -1).join(", ")}, & ${formatted[formatted.length - 1]}`;
-}
-
-/** Build a disambiguated citation bank from retrieved papers. */
-export function buildCitationBank(papers: AlphaXivPaper[]): CitationBankEntry[] {
-	// Never emit (Unknown, n.d.) — incomplete metadata is not citeable.
-	const eligible = filterCiteEligiblePapers(papers);
-	const baseCounts = new Map<string, number>();
-	const preliminary = eligible.map((paper) => {
-		const authors = paper.authors.filter(Boolean);
-		const surname = authorSurname(authors[0] ?? "Unknown");
-		const year = paperYear(paper);
-		const base = `${surname.toLowerCase()}|${year}`;
-		baseCounts.set(base, (baseCounts.get(base) ?? 0) + 1);
-		return { paper, authors, surname, year, base };
-	});
-
-	const seen = new Map<string, number>();
-	return preliminary
-		.map(({ paper, authors, surname, year, base }) => {
-			const needsLetter = (baseCounts.get(base) ?? 0) > 1;
-			const ordinal = (seen.get(base) ?? 0) + 1;
-			seen.set(base, ordinal);
-			const yearLabel =
-				needsLetter && year !== "n.d."
-					? `${year}${String.fromCharCode(96 + ordinal)}` // a, b, c…
-					: year;
-			const citeKey = `${surname.toLowerCase()}|${yearLabel}`;
-			const title = paper.title.replace(/\*/g, "").replace(/[\[\]]/g, "").trim();
-			const authorLine = formatAuthorLine(authors);
-			// Plain title + explicit Source link (References only — body links are stripped).
-			const referenceLine = `${authorLine} (${yearLabel}). ${title}. [Source](${paper.url}).`;
-			const inTextParen =
-				authors.length === 0
-					? `(${surname}, ${yearLabel})`
-					: authors.length === 1
-						? `(${surname}, ${yearLabel})`
-						: authors.length === 2
-							? `(${surname} & ${authorSurname(authors[1]!)}, ${yearLabel})`
-							: `(${surname} et al., ${yearLabel})`;
-
-			return {
-				citeKey,
-				surname,
-				year: yearLabel,
-				authors,
-				title,
-				url: paper.url,
-				authorLine,
-				referenceLine,
-				inTextParen,
-				abstract: truncateAbstract(paper.abstract),
-			};
-		})
-		.filter(
-			(entry) =>
-				entry.surname.toLowerCase() !== "unknown" &&
-				entry.year !== "n.d." &&
-				!entry.year.toLowerCase().startsWith("n.d"),
-		);
-}
 
 export const ALPHAXIV_RESEARCH_WORKFLOWS = new Set([
 	"chat-paper",
@@ -517,43 +215,35 @@ export function formatPapersForContext(
 	sourceLabel = "AlphaXiv/arXiv",
 ): string {
 	if (papers.length === 0) {
-		return [
-			`No papers were found via ${sourceLabel} for "${query}".`,
-			"Do NOT invent authors, years, titles, or DOIs.",
-			"Write with cautious language and omit in-text citations rather than fabricating sources.",
-		].join(" ");
+		return `No papers were found via ${sourceLabel} for "${query}". Use cautious language and cite well-known sources in the field.`;
 	}
 
-	const bank = buildCitationBank(papers);
-	const lines = bank.map((entry, index) => {
-		const abstract = entry.abstract || "Abstract unavailable.";
+	const lines = papers.map((paper, index) => {
+		const authorLine =
+			paper.authors.length > 0
+				? paper.authors.slice(0, 6).join(", ") + (paper.authors.length > 6 ? ", et al." : "")
+				: "Authors unavailable";
+		const year = paper.publicationDate ? new Date(paper.publicationDate).getFullYear() : "n.d.";
+		const title = paper.title.replace(/\*/g, "");
+		const abstract = paper.abstract
+			? paper.abstract.replace(/\s+/g, " ").slice(0, 600)
+			: "Abstract unavailable.";
 
 		return [
-			`${index + 1}. **${entry.title}**`,
-			`   Authors: ${entry.authorLine}`,
-			`   Year: ${entry.year}`,
-			`   Cite as: ${entry.inTextParen}`,
-			`   Reference format: ${entry.referenceLine}`,
+			`${index + 1}. **${title}**`,
+			`   Authors: ${authorLine}`,
+			`   Year: ${year}`,
+			`   Reference format: ${authorLine} (${year}). [*${title}*](${paper.url})`,
 			`   Abstract: ${abstract}`,
 		].join("\n");
 	});
 
-	const citeKeyList = bank.map((e) => `- ${e.inTextParen} → ${e.referenceLine}`).join("\n");
-	const evidenceCards = buildEvidenceCardsFromBank(bank);
-
 	return [
 		`${sourceLabel} retrieved ${papers.length} real paper(s) for the query "${query}".`,
-		"You may ONLY cite papers from this list. Do not invent authors, years, titles, or DOIs.",
-		"Every in-text citation must use a Cite-as key from this list; the References section must list exactly those cited papers (use each Reference format line).",
-		"Paraphrase literature claims from the evidence cards / abstracts below — never decorate invented prose with unrelated bank cites.",
-		"Never mention preprint servers, repository names, or paper ID numbers in the visible text.",
+		"Use these as primary literature sources. Cite by author and year in the body.",
+		"In the References section, embed each title as [*Title*](url). Never mention preprint servers, repository names, or paper ID numbers.",
+		"Do not invent papers outside this list unless clearly marked as general background.",
 		"",
-		"## Allowed citation keys",
-		citeKeyList,
-		"",
-		evidenceCards,
-		"",
-		"## Paper details",
 		...lines,
 	].join("\n");
 }
@@ -569,7 +259,7 @@ export type PaperSearchSource =
 
 const PAPER_SOURCE_LABELS: Record<PaperSearchSource, string> = {
 	library: "Paper library (RAG)",
-	hybrid: "Merged literature retrieval",
+	hybrid: "Paper library + live literature",
 	alphaxiv: "AlphaXiv",
 	arxiv: "arXiv",
 	"alphaxiv-mcp": "AlphaXiv MCP",
@@ -586,39 +276,44 @@ async function fetchPapersFromExternalApis(
 	query: string,
 	options?: { limit?: number; signal?: AbortSignal },
 ): Promise<PaperSearchResult> {
-	const limit = options?.limit ?? DEFAULT_LIMIT;
-	const signal = options?.signal;
+	let papers: AlphaXivPaper[] = [];
+	let source: PaperSearchSource = "none";
 
-	const settled = await Promise.allSettled([
-		isAlphaXivEnabled()
-			? searchPapers(query, { limit, signal })
-			: Promise.resolve([] as AlphaXivPaper[]),
-		searchArxivPapers(query, { limit, signal }),
-		getAlphaXivApiKey()
-			? searchPapersViaMcp(query, { limit, signal })
-			: Promise.resolve([] as AlphaXivPaper[]),
-		searchTavilyPapers(query, { limit, signal }),
-	]);
+	if (isAlphaXivEnabled()) {
+		try {
+			papers = await searchPapers(query, options);
+			if (papers.length > 0) source = "alphaxiv";
+		} catch {
+			/* fall through to arXiv / Tavily */
+		}
+	}
 
-	const batches: AlphaXivPaper[][] = settled.map((result) =>
-		result.status === "fulfilled" ? result.value : [],
-	);
-	const [alphaxivPapers, arxivPapers, mcpPapers, tavilyPapers] = batches;
+	if (papers.length === 0) {
+		try {
+			papers = await searchArxivPapers(query, options);
+			if (papers.length > 0) source = "arxiv";
+		} catch {
+			/* fall through */
+		}
+	}
 
-	const papers = mergeRankPapers(batches, query, limit);
-	if (papers.length === 0) return { papers: [], source: "none" };
+	if (papers.length === 0 && getAlphaXivApiKey()) {
+		try {
+			papers = await searchPapersViaMcp(query, options);
+			if (papers.length > 0) source = "alphaxiv-mcp";
+		} catch {
+			/* fall through */
+		}
+	}
 
-	const sourceCounts: Array<{ source: PaperSearchSource; count: number }> = [
-		{ source: "alphaxiv", count: alphaxivPapers?.length ?? 0 },
-		{ source: "arxiv", count: arxivPapers?.length ?? 0 },
-		{ source: "alphaxiv-mcp", count: mcpPapers?.length ?? 0 },
-		{ source: "tavily", count: tavilyPapers?.length ?? 0 },
-	];
-	const nonEmpty = sourceCounts.filter((s) => s.count > 0);
-	const source: PaperSearchSource =
-		nonEmpty.length > 1
-			? "hybrid"
-			: (nonEmpty[0]?.source ?? "none");
+	if (papers.length === 0) {
+		try {
+			papers = await searchTavilyPapers(query, options);
+			if (papers.length > 0) source = "tavily";
+		} catch {
+			/* no papers */
+		}
+	}
 
 	return { papers, source };
 }
@@ -627,40 +322,46 @@ export async function fetchPapersForQueryDetailed(
 	query: string,
 	options?: { limit?: number; signal?: AbortSignal },
 ): Promise<PaperSearchResult> {
-	const scholarly = buildScholarlySearchQuery(query) || query.trim();
-	if (!scholarly) return { papers: [], source: "none" };
+	const trimmed = query.trim();
+	if (!trimmed) return { papers: [], source: "none" };
 
 	const limit = options?.limit ?? DEFAULT_LIMIT;
 
-	/** 1) Library RAG — soft preference, never exclusive short-circuit on weak hits. */
+	/** 1) Library-first RAG — reuse previously retrieved publications. */
 	const libraryPapers = isPaperLibraryEnabled()
-		? await searchPaperLibrary(scholarly, { limit })
+		? await searchPaperLibrary(trimmed, { limit })
 		: [];
 
-	/** 2) Live APIs in parallel — merge + rank with library. */
-	const external = await fetchPapersFromExternalApis(scholarly, { ...options, limit });
+	if (libraryHasEnoughHits(libraryPapers.length, limit)) {
+		return {
+			papers: libraryPapers.slice(0, limit),
+			source: "library",
+		};
+	}
+
+	/** 2) Live APIs when the local library does not cover the query. */
+	const external = await fetchPapersFromExternalApis(trimmed, { ...options, limit });
 
 	if (
 		external.source !== "none" &&
 		external.source !== "library" &&
+		external.source !== "hybrid" &&
 		external.papers.length > 0
 	) {
-		const librarySource =
-			external.source === "hybrid" ? "alphaxiv" : external.source;
-		void upsertPapersIntoLibrary(external.papers, scholarly, librarySource).catch(() => {
+		void upsertPapersIntoLibrary(external.papers, trimmed, external.source).catch(() => {
 			/* non-blocking library write */
 		});
 	}
 
-	const papers = mergeRankPapers([libraryPapers, external.papers], scholarly, limit);
+	if (libraryPapers.length === 0) {
+		return external;
+	}
 
-	if (papers.length === 0) return { papers: [], source: "none" };
-
-	let source: PaperSearchSource = external.source;
-	if (libraryPapers.length > 0 && external.papers.length > 0) source = "hybrid";
-	else if (libraryPapers.length > 0 && external.papers.length === 0) source = "library";
-
-	return { papers, source };
+	const merged = mergeUniquePapers(libraryPapers, external.papers, limit);
+	return {
+		papers: merged,
+		source: external.papers.length > 0 ? "hybrid" : "library",
+	};
 }
 
 export async function fetchPapersForQuery(
@@ -675,16 +376,16 @@ export async function buildPaperSearchContext(
 	query: string,
 	options?: { limit?: number; signal?: AbortSignal },
 ): Promise<{ context: string; papers: AlphaXivPaper[]; source: PaperSearchSource } | null> {
-	const scholarly = buildScholarlySearchQuery(query) || query.trim();
-	if (!scholarly) return null;
+	const trimmed = query.trim();
+	if (!trimmed) return null;
 
-	const { papers, source } = await fetchPapersForQueryDetailed(scholarly, options);
+	const { papers, source } = await fetchPapersForQueryDetailed(trimmed, options);
 	const sourceLabel = PAPER_SOURCE_LABELS[source];
 
 	return {
 		papers,
 		source,
-		context: formatPapersForContext(papers, scholarly, sourceLabel),
+		context: formatPapersForContext(papers, trimmed, sourceLabel),
 	};
 }
 

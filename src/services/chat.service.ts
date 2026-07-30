@@ -7,28 +7,13 @@ import { SessionModel } from "../db/models/Session.js";
 import { UserModel } from "../db/models/User.js";
 import type { AppContext } from "../lib/app-context.js";
 import {
-	buildCitationBank,
 	buildPaperSearchContext,
-	buildScholarlySearchQuery,
 	shouldUseAlphaXiv,
-	type CitationBankEntry,
 } from "./alphaxiv.service.js";
 import { evaluatePolicy } from "./admin-policy.service.js";
 import type { TokenUsage } from "../types/token-usage.js";
-import { friendlyLlmError, streamOpenRouterChat, type ChatTurn } from "./llm.service.js";
+import { streamOpenRouterChat, type ChatTurn } from "./llm.service.js";
 import { formatResearchPaperReferences } from "./research-paper-format.service.js";
-import {
-	auditChatPaperCitations,
-	buildChatPaperCitationFixPrompt,
-	buildChatPaperGroundingFixPrompt,
-	buildChatPaperReferencesFixPrompt,
-	estimateLiteratureBankSize,
-	pickBetterCitedDraft,
-	pickBetterGroundedDraft,
-	preferRicherReferences,
-	rebuildReferencesFromBank,
-	stripInTextCitationsFromAbstract,
-} from "./research-paper-citations.service.js";
 import { saveResearchPaper } from "./research.service.js";
 import {
 	assertStudentHasTokenBalance,
@@ -150,18 +135,14 @@ export class ChatService {
 	private async enrichHistoryWithAlphaXiv(
 		history: ChatTurn[],
 		options: { workflow?: string | null; topic?: string | null; userMessage: string },
-	): Promise<{ history: ChatTurn[]; bank: CitationBankEntry[] }> {
-		if (!shouldUseAlphaXiv(options.workflow)) return { history, bank: [] };
+	): Promise<ChatTurn[]> {
+		if (!shouldUseAlphaXiv(options.workflow)) return history;
 
 		const userMessages = history.filter((turn) => turn.role === "user");
-		if (userMessages.length !== 1) return { history, bank: [] };
+		if (userMessages.length !== 1) return history;
 
-		const query =
-			buildScholarlySearchQuery(options.topic?.trim() || "") ||
-			buildScholarlySearchQuery(options.userMessage) ||
-			options.topic?.trim() ||
-			options.userMessage.trim();
-		if (!query) return { history, bank: [] };
+		const query = options.topic?.trim() || options.userMessage.trim();
+		if (!query) return history;
 
 		this.emit({
 			type: "agent_event",
@@ -178,15 +159,13 @@ export class ChatService {
 				event: { type: "tool_execution_end", toolName: "alphaxiv_search", isError: false },
 			});
 
-			if (!result) return { history, bank: [] };
-
-			const bank = buildCitationBank(result.papers);
+			if (!result) return history;
 
 			const retrievalLabel =
 				result.source === "library"
 					? "Paper library RAG retrieval"
 					: result.source === "hybrid"
-						? "Merged literature retrieval"
+						? "Paper library + live literature retrieval"
 						: result.source === "tavily"
 							? "Tavily literature retrieval"
 							: result.source === "arxiv"
@@ -196,7 +175,7 @@ export class ChatService {
 									: "AlphaXiv literature retrieval";
 			const contextBlock = `[${retrievalLabel}]\n\n${result.context}`;
 			const systemIndex = history.findIndex((turn) => turn.role === "system");
-			if (systemIndex < 0) return { history, bank };
+			if (systemIndex < 0) return history;
 
 			const updatedSystem = `${history[systemIndex]!.content}\n\n${contextBlock}`;
 			await MessageModel.findOneAndUpdate(
@@ -206,7 +185,7 @@ export class ChatService {
 
 			const nextHistory = [...history];
 			nextHistory[systemIndex] = { role: "system", content: updatedSystem };
-			return { history: nextHistory, bank };
+			return nextHistory;
 		} catch (error) {
 			this.emit({
 				type: "agent_event",
@@ -218,9 +197,9 @@ export class ChatService {
 			});
 
 			const message = error instanceof Error ? error.message : String(error);
-			const contextBlock = `[Literature retrieval failed: ${message}. Do not invent papers. Use cautious language without fabricated citations.]`;
+			const contextBlock = `[Literature retrieval failed: ${message}. Continue with cautious citations and clearly mark uncertain sources.]`;
 			const systemIndex = history.findIndex((turn) => turn.role === "system");
-			if (systemIndex < 0) return { history, bank: [] };
+			if (systemIndex < 0) return history;
 
 			const updatedSystem = `${history[systemIndex]!.content}\n\n${contextBlock}`;
 			await MessageModel.findOneAndUpdate(
@@ -230,7 +209,7 @@ export class ChatService {
 
 			const nextHistory = [...history];
 			nextHistory[systemIndex] = { role: "system", content: updatedSystem };
-			return { history: nextHistory, bank: [] };
+			return nextHistory;
 		}
 	}
 
@@ -286,14 +265,11 @@ export class ChatService {
 
 		const history = await this.loadHistory();
 		const session = await SessionModel.findById(this.sessionId).lean();
-		const { history: llmHistory, bank: literatureBank } = await this.enrichHistoryWithAlphaXiv(
-			history,
-			{
-				workflow: session?.workflow,
-				topic: session?.topic,
-				userMessage: trimmed,
-			},
-		);
+		const llmHistory = await this.enrichHistoryWithAlphaXiv(history, {
+			workflow: session?.workflow,
+			topic: session?.topic,
+			userMessage: trimmed,
+		});
 
 		this.emit({
 			type: "agent_event",
@@ -302,7 +278,7 @@ export class ChatService {
 
 		let assistantText = "";
 		try {
-			const maxTokens = session?.workflow === "chat-paper" ? 16_000 : undefined;
+			const maxTokens = session?.workflow === "chat-paper" ? 12_000 : undefined;
 			const { text, usage } = await streamOpenRouterChat(llmHistory, {
 				signal: this.abortController.signal,
 				maxTokens,
@@ -317,239 +293,9 @@ export class ChatService {
 				},
 			});
 			assistantText = text;
-			let totalUsage = usage;
 
 			if (session?.workflow === "chat-paper") {
 				assistantText = formatResearchPaperReferences(assistantText);
-				assistantText = stripInTextCitationsFromAbstract(assistantText);
-
-				const systemContent =
-					llmHistory.find((turn) => turn.role === "system")?.content ?? "";
-				const bankSize =
-					literatureBank.length > 0
-						? literatureBank.length
-						: estimateLiteratureBankSize(systemContent);
-
-				if (literatureBank.length > 0) {
-					assistantText = rebuildReferencesFromBank(assistantText, literatureBank);
-					assistantText = formatResearchPaperReferences(assistantText);
-					assistantText = stripInTextCitationsFromAbstract(assistantText);
-				}
-
-				let audit = auditChatPaperCitations(assistantText, bankSize, literatureBank);
-
-				const mergeUsage = (nextUsage: TokenUsage | undefined) => {
-					if (!nextUsage) return;
-					totalUsage = {
-						promptTokens: (totalUsage?.promptTokens ?? 0) + (nextUsage.promptTokens ?? 0),
-						completionTokens:
-							(totalUsage?.completionTokens ?? 0) + (nextUsage.completionTokens ?? 0),
-						totalTokens: (totalUsage?.totalTokens ?? 0) + (nextUsage.totalTokens ?? 0),
-					};
-				};
-
-				const needsFix =
-					!audit.ok ||
-					(audit.alignment != null && !audit.alignment.ok) ||
-					audit.failedSections.length > 0;
-
-				if (needsFix) {
-					const bodyNeedsFix =
-						audit.failedSections.length > 0 ||
-						(audit.alignment != null && audit.alignment.unknownKeys.length > 0);
-					const refsNeedFix = !audit.referencesOk && literatureBank.length === 0;
-					const toolName = bodyNeedsFix ? "citation_fix" : "references_fix";
-
-					this.emit({
-						type: "agent_event",
-						event: {
-							type: "tool_execution_start",
-							toolName,
-						},
-					});
-
-					try {
-						const originalDraft = assistantText;
-
-						if (bodyNeedsFix) {
-							const { system, user } = buildChatPaperCitationFixPrompt(
-								assistantText,
-								audit,
-								bankSize,
-								literatureBank,
-							);
-							const fixed = await streamOpenRouterChat(
-								[
-									{ role: "system", content: `${systemContent}\n\n${system}` },
-									{ role: "user", content: user },
-								],
-								{
-									signal: this.abortController.signal,
-									maxTokens: 16_000,
-									onDelta: () => {
-										/* silent fix — final text replaces stream via message_end */
-									},
-								},
-							);
-							mergeUsage(fixed.usage);
-							assistantText = pickBetterCitedDraft(
-								originalDraft,
-								formatResearchPaperReferences(fixed.text),
-								bankSize,
-								literatureBank,
-							);
-							assistantText = stripInTextCitationsFromAbstract(assistantText);
-							if (literatureBank.length > 0) {
-								assistantText = rebuildReferencesFromBank(
-									assistantText,
-									literatureBank,
-								);
-								assistantText = formatResearchPaperReferences(assistantText);
-								assistantText = stripInTextCitationsFromAbstract(assistantText);
-							}
-							audit = auditChatPaperCitations(
-								assistantText,
-								bankSize,
-								literatureBank,
-							);
-						}
-
-						if (
-							literatureBank.length === 0 &&
-							(!audit.referencesOk || (refsNeedFix && !bodyNeedsFix))
-						) {
-							const beforeRefs = assistantText;
-							const { system, user } = buildChatPaperReferencesFixPrompt(
-								assistantText,
-								audit,
-								bankSize,
-								literatureBank,
-							);
-							const fixedRefs = await streamOpenRouterChat(
-								[
-									{ role: "system", content: `${systemContent}\n\n${system}` },
-									{ role: "user", content: user },
-								],
-								{
-									signal: this.abortController.signal,
-									maxTokens: 6_000,
-									onDelta: () => {
-										/* silent refs rebuild */
-									},
-								},
-							);
-							mergeUsage(fixedRefs.usage);
-							const formattedRefs = formatResearchPaperReferences(fixedRefs.text);
-							assistantText = preferRicherReferences(
-								beforeRefs,
-								pickBetterCitedDraft(
-									beforeRefs,
-									formattedRefs,
-									bankSize,
-									literatureBank,
-								),
-							);
-							assistantText = stripInTextCitationsFromAbstract(assistantText);
-							audit = auditChatPaperCitations(
-								assistantText,
-								bankSize,
-								literatureBank,
-							);
-						} else if (literatureBank.length > 0) {
-							assistantText = rebuildReferencesFromBank(
-								assistantText,
-								literatureBank,
-							);
-							assistantText = formatResearchPaperReferences(assistantText);
-							assistantText = stripInTextCitationsFromAbstract(assistantText);
-							audit = auditChatPaperCitations(
-								assistantText,
-								bankSize,
-								literatureBank,
-							);
-						}
-
-						this.emit({
-							type: "agent_event",
-							event: {
-								type: "tool_execution_end",
-								toolName,
-								isError: !audit.ok,
-							},
-						});
-					} catch {
-						this.emit({
-							type: "agent_event",
-							event: {
-								type: "tool_execution_end",
-								toolName,
-								isError: true,
-							},
-						});
-					}
-				} else if (literatureBank.length > 0) {
-					assistantText = rebuildReferencesFromBank(assistantText, literatureBank);
-					assistantText = formatResearchPaperReferences(assistantText);
-					assistantText = stripInTextCitationsFromAbstract(assistantText);
-				}
-
-				/** Ground cited sentences against bank abstracts (bank present only). */
-				if (literatureBank.length > 0) {
-					this.emit({
-						type: "agent_event",
-						event: {
-							type: "tool_execution_start",
-							toolName: "grounding_fix",
-						},
-					});
-					try {
-						const beforeGround = assistantText;
-						const { system, user } = buildChatPaperGroundingFixPrompt(
-							assistantText,
-							literatureBank,
-						);
-						const grounded = await streamOpenRouterChat(
-							[
-								{ role: "system", content: `${systemContent}\n\n${system}` },
-								{ role: "user", content: user },
-							],
-							{
-								signal: this.abortController.signal,
-								maxTokens: 16_000,
-								onDelta: () => {
-									/* silent grounding rewrite */
-								},
-							},
-						);
-						mergeUsage(grounded.usage);
-						assistantText = pickBetterGroundedDraft(
-							beforeGround,
-							formatResearchPaperReferences(grounded.text),
-							literatureBank,
-						);
-						assistantText = stripInTextCitationsFromAbstract(assistantText);
-						assistantText = rebuildReferencesFromBank(assistantText, literatureBank);
-						assistantText = formatResearchPaperReferences(assistantText);
-						assistantText = stripInTextCitationsFromAbstract(assistantText);
-						this.emit({
-							type: "agent_event",
-							event: {
-								type: "tool_execution_end",
-								toolName: "grounding_fix",
-								isError: false,
-							},
-						});
-					} catch {
-						this.emit({
-							type: "agent_event",
-							event: {
-								type: "tool_execution_end",
-								toolName: "grounding_fix",
-								isError: true,
-							},
-						});
-					}
-				}
 			}
 
 			await MessageModel.create({
@@ -558,7 +304,7 @@ export class ChatService {
 				content: assistantText,
 			});
 
-			await this.persistResearchIfPaper(assistantText, trimmed, totalUsage, userId);
+			await this.persistResearchIfPaper(assistantText, trimmed, usage, userId);
 
 			this.emit({
 				type: "agent_event",
@@ -567,15 +313,15 @@ export class ChatService {
 					message: { content: assistantText },
 				},
 			});
-			if (totalUsage) {
+			if (usage) {
 				this.emit({
 					type: "agent_event",
-					event: { type: "token_usage", usage: totalUsage },
+					event: { type: "token_usage", usage },
 				});
 			}
 
-			if (userId && totalUsage?.totalTokens) {
-				const quota = await deductStudentTokens(userId, totalUsage.totalTokens);
+			if (userId && usage?.totalTokens) {
+				const quota = await deductStudentTokens(userId, usage.totalTokens);
 				if (quota) {
 					this.emit({ type: "student_token_quota", quota });
 				}
@@ -591,9 +337,9 @@ export class ChatService {
 				this.setState("idle");
 				return requestId;
 			}
-			const friendly = friendlyLlmError(error);
-			this.setState("error", friendly.message);
-			throw friendly;
+			const msg = error instanceof Error ? error.message : String(error);
+			this.setState("error", msg);
+			throw error;
 		} finally {
 			this.abortController = null;
 		}
