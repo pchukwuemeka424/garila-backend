@@ -6,6 +6,7 @@ import {
 	type StudentTokenQuota,
 } from "../constants/student-tokens.js";
 import { UserModel } from "../db/models/User.js";
+import { quotaForUserAsync } from "./token-quota.service.js";
 
 export {
 	LECTURER_TOKEN_ALLOWANCE,
@@ -16,9 +17,11 @@ export {
 };
 
 export async function getStudentTokenQuota(userId: string): Promise<StudentTokenQuota | null> {
-	const user = await UserModel.findById(userId).select("role tokensUsed").lean();
+	const user = await UserModel.findById(userId)
+		.select("role tokensUsed tokenAllowance universityId")
+		.lean();
 	if (!user) return null;
-	return buildTokenQuota(user.role, user.tokensUsed ?? 0);
+	return quotaForUserAsync(user);
 }
 
 export async function assertStudentHasTokenBalance(userId: string): Promise<void> {
@@ -42,9 +45,9 @@ export async function deductStudentTokens(
 		{ $inc: { tokensUsed: Math.round(amount) } },
 		{ new: true },
 	)
-		.select("role tokensUsed")
+		.select("role tokensUsed tokenAllowance universityId")
 		.lean();
 
 	if (!user) return null;
-	return buildTokenQuota(user.role, user.tokensUsed ?? 0);
+	return quotaForUserAsync(user);
 }

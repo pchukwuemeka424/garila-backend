@@ -64,6 +64,8 @@ const userSchema = new Schema(
 		status: { type: String, enum: ["active", "inactive", "suspended"], default: "active" },
 		lastActiveAt: { type: Date },
 		tokensUsed: { type: Number, default: 0, min: 0 },
+		/** Optional per-user allowance override (null/unset = university or platform default). */
+		tokenAllowance: { type: Number, min: 0, default: null },
 		permissions: {
 			type: Map,
 			of: [String],

@@ -1,6 +1,6 @@
 import { Types } from "mongoose";
 
-import { buildTokenQuota, type StudentTokenQuota } from "../constants/student-tokens.js";
+import type { StudentTokenQuota } from "../constants/student-tokens.js";
 import { UserModel, type UserDocument } from "../db/models/User.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
 import { signAuthToken } from "../lib/auth-token.js";
@@ -8,6 +8,7 @@ import {
 	getActiveUniversityByCatalogueId,
 	isUniversityActive,
 } from "./admin-universities.service.js";
+import { quotaForUserAsync } from "./token-quota.service.js";
 
 export type PublicUser = {
 	id: string;
@@ -26,11 +27,12 @@ export type PublicUser = {
 const UNIVERSITY_NOT_ONBOARDED =
 	"Your university is not yet onboarded on this platform. Contact your administrator.";
 
-function toPublicUser(user: UserDocument | Record<string, unknown>): PublicUser {
+async function toPublicUser(user: UserDocument | Record<string, unknown>): Promise<PublicUser> {
 	const doc = user as UserDocument & {
 		createdAt: Date;
 		lastActiveAt?: Date;
 		tokensUsed?: number;
+		tokenAllowance?: number | null;
 		universityId?: Types.ObjectId | null;
 	};
 	const publicUser: PublicUser = {
@@ -45,7 +47,7 @@ function toPublicUser(user: UserDocument | Record<string, unknown>): PublicUser 
 		lastActiveAt: doc.lastActiveAt?.toISOString() ?? null,
 		createdAt: doc.createdAt.toISOString(),
 	};
-	const tokenQuota = buildTokenQuota(doc.role, doc.tokensUsed ?? 0);
+	const tokenQuota = await quotaForUserAsync(doc);
 	if (tokenQuota) {
 		publicUser.tokenQuota = tokenQuota;
 	}
@@ -68,6 +70,7 @@ async function assertUniversityAccess(user: {
 async function resolveRegistrationUniversity(input: {
 	catalogueId?: string;
 	institution?: string;
+	country?: string;
 }) {
 	const catalogueId = input.catalogueId?.trim();
 	if (!catalogueId) throw new Error("Please select your institution.");
@@ -75,6 +78,12 @@ async function resolveRegistrationUniversity(input: {
 	// Gate before any user write: only onboarded (active) universities may register.
 	const university = await getActiveUniversityByCatalogueId(catalogueId);
 	if (!university) throw new Error(UNIVERSITY_NOT_ONBOARDED);
+
+	const requestedCountry = input.country?.trim().toUpperCase();
+	const universityCountry = ((university as { country?: string }).country ?? "NG").toUpperCase();
+	if (requestedCountry && requestedCountry !== universityCountry) {
+		throw new Error("Selected institution does not match the chosen country.");
+	}
 
 	return {
 		universityId: university._id,
@@ -89,6 +98,7 @@ export async function registerStudent(input: {
 	department: string;
 	institution?: string;
 	catalogueId?: string;
+	country?: string;
 }) {
 	const name = input.name.trim();
 	const email = input.email.trim().toLowerCase();
@@ -145,7 +155,7 @@ export async function registerStudent(input: {
 		role: user.role,
 	});
 
-	return { token, user: toPublicUser(user) };
+	return { token, user: await toPublicUser(user) };
 }
 
 export async function registerLecturer(input: {
@@ -155,6 +165,7 @@ export async function registerLecturer(input: {
 	department: string;
 	institution?: string;
 	catalogueId?: string;
+	country?: string;
 }) {
 	const name = input.name.trim();
 	const email = input.email.trim().toLowerCase();
@@ -211,7 +222,7 @@ export async function registerLecturer(input: {
 		role: user.role,
 	});
 
-	return { token, user: toPublicUser(user) };
+	return { token, user: await toPublicUser(user) };
 }
 
 export async function loginUser(input: { email: string; password: string }) {
@@ -238,7 +249,7 @@ export async function loginUser(input: { email: string; password: string }) {
 		role: user.role,
 	});
 
-	return { token, user: toPublicUser(user) };
+	return { token, user: await toPublicUser(user) };
 }
 
 export async function getUserById(id: string): Promise<PublicUser | null> {

@@ -1,4 +1,7 @@
-# Coolify: when Base Directory = backend/
+# Coolify / Nixpacks — backend API only
+# Coolify: set Base Directory to `backend` OR use Dockerfile (preferred).
+# If Base Directory is repo root, use the install/build cmds below via custom plan.
+
 providers = ["node"]
 
 [variables]
@@ -7,10 +10,10 @@ NIXPACKS_NODE_VERSION = "22"
 PORT = "3141"
 
 [phases.install]
-cmds = ["npm ci"]
+cmds = ["npm ci --prefix backend"]
 
 [phases.build]
-cmds = ["npx tsc -p tsconfig.json"]
+cmds = ["npx tsc -p backend/tsconfig.json"]
 
 [start]
-cmd = "node dist/index.js"
+cmd = "node backend/dist/index.js"

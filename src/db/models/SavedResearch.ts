@@ -17,6 +17,16 @@ const savedResearchSchema = new Schema(
 		topic: { type: String, required: true },
 		title: { type: String, required: true },
 		content: { type: String, required: true },
+		/** Content as last written by AI — used to score user edit effort. */
+		aiBaselineContent: { type: String, default: null },
+		humanEdited: { type: Boolean, default: false },
+		/** Sources selected when the paper was generated (for effort / attribution). */
+		sources: {
+			documentIds: { type: [String], default: [] },
+			datasetIds: { type: [String], default: [] },
+			noteIds: { type: [String], default: [] },
+			projectIds: { type: [String], default: [] },
+		},
 		tokenUsage: { type: tokenUsageSchema },
 	},
 	{ timestamps: true },

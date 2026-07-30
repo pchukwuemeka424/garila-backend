@@ -17,10 +17,32 @@ export type SavedResearchDto = {
 	topic: string;
 	title: string;
 	content: string;
+	aiBaselineContent: string | null;
+	humanEdited: boolean;
+	sources: {
+		documentIds: string[];
+		datasetIds: string[];
+		noteIds: string[];
+		projectIds: string[];
+	};
 	tokenUsage?: TokenUsage;
 	createdAt: string;
 	updatedAt: string;
 };
+
+function normalizeSources(raw?: {
+	documentIds?: string[] | null;
+	datasetIds?: string[] | null;
+	noteIds?: string[] | null;
+	projectIds?: string[] | null;
+} | null) {
+	return {
+		documentIds: Array.isArray(raw?.documentIds) ? raw.documentIds.map(String) : [],
+		datasetIds: Array.isArray(raw?.datasetIds) ? raw.datasetIds.map(String) : [],
+		noteIds: Array.isArray(raw?.noteIds) ? raw.noteIds.map(String) : [],
+		projectIds: Array.isArray(raw?.projectIds) ? raw.projectIds.map(String) : [],
+	};
+}
 
 function toSavedResearchDto(doc: {
 	_id: Types.ObjectId;
@@ -30,6 +52,14 @@ function toSavedResearchDto(doc: {
 	topic: string;
 	title: string;
 	content: string;
+	aiBaselineContent?: string | null;
+	humanEdited?: boolean | null;
+	sources?: {
+		documentIds?: string[] | null;
+		datasetIds?: string[] | null;
+		noteIds?: string[] | null;
+		projectIds?: string[] | null;
+	} | null;
 	tokenUsage?: TokenUsage | null;
 	createdAt: Date;
 	updatedAt: Date;
@@ -43,6 +73,9 @@ function toSavedResearchDto(doc: {
 		topic: doc.topic,
 		title,
 		content: doc.content,
+		aiBaselineContent: doc.aiBaselineContent ?? null,
+		humanEdited: Boolean(doc.humanEdited),
+		sources: normalizeSources(doc.sources),
 		...(doc.tokenUsage ? { tokenUsage: doc.tokenUsage } : {}),
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
@@ -56,6 +89,12 @@ export async function saveResearchPaper(input: {
 	topic: string;
 	content: string;
 	tokenUsage?: TokenUsage;
+	sources?: {
+		documentIds?: string[];
+		datasetIds?: string[];
+		noteIds?: string[];
+		projectIds?: string[];
+	} | null;
 }): Promise<SavedResearchDto> {
 	const topic = input.topic.trim();
 	const content = input.content.trim();
@@ -65,13 +104,24 @@ export async function saveResearchPaper(input: {
 
 	const title = extractPaperTitle(content, topic);
 	const workflow = input.workflow?.trim() || "chat-paper";
-	const filter: Record<string, unknown> = { topic, workflow };
-	if (input.userId) filter.userId = input.userId;
+	const sources = normalizeSources(input.sources);
+	if (!input.userId) {
+		throw new Error("Authentication required to save research.");
+	}
+	const filter: Record<string, unknown> = {
+		topic,
+		workflow,
+		userId: new Types.ObjectId(input.userId),
+	};
 
 	const existing = await SavedResearchModel.findOne(filter).sort({ updatedAt: -1 });
 	if (existing) {
 		existing.content = content;
 		existing.title = title;
+		// Fresh AI generation — reset baseline for effort scoring.
+		existing.aiBaselineContent = content;
+		existing.humanEdited = false;
+		existing.sources = sources;
 		if (input.sessionId) existing.sessionId = new Types.ObjectId(input.sessionId);
 		if (input.tokenUsage) existing.tokenUsage = input.tokenUsage;
 		await existing.save();
@@ -79,12 +129,15 @@ export async function saveResearchPaper(input: {
 	}
 
 	const created = await SavedResearchModel.create({
-		userId: input.userId ?? undefined,
+		userId: new Types.ObjectId(input.userId),
 		sessionId: input.sessionId ?? undefined,
 		workflow,
 		topic,
 		title,
 		content,
+		aiBaselineContent: content,
+		humanEdited: false,
+		sources,
 		...(input.tokenUsage ? { tokenUsage: input.tokenUsage } : {}),
 	});
 	return toSavedResearchDto(created);
@@ -116,11 +169,12 @@ function dedupeSavedResearch(rows: SavedResearchDto[]): SavedResearchDto[] {
 }
 
 export async function listSavedResearch(userId?: string | null, limit = 50): Promise<SavedResearchDto[]> {
-	const query: Record<string, unknown> = userId
-		? { userId: new Types.ObjectId(userId) }
-		: { $or: [{ userId: { $exists: false } }, { userId: null }] };
+	if (!userId) return [];
 
-	const rows = await SavedResearchModel.find(query).sort({ updatedAt: -1 }).limit(limit * 2).lean();
+	const rows = await SavedResearchModel.find({ userId: new Types.ObjectId(userId) })
+		.sort({ updatedAt: -1 })
+		.limit(limit * 2)
+		.lean();
 	const mapped = rows.map((row) =>
 		toSavedResearchDto({
 			...row,
@@ -136,11 +190,10 @@ function canAccessSavedResearch(
 	doc: { userId?: Types.ObjectId | null },
 	userId?: string | null,
 ): boolean {
+	if (!userId) return false;
 	const ownerId = doc.userId?.toString() ?? null;
-	if (userId) {
-		return !ownerId || ownerId === userId;
-	}
-	return !ownerId;
+	// Ownerless legacy rows are not shared — only the matching owner may access.
+	return Boolean(ownerId && ownerId === userId);
 }
 
 export async function getSavedResearchById(
@@ -171,36 +224,33 @@ export async function updateSavedResearchById(
 		throw new Error("Topic and content are required.");
 	}
 
+	const previousContent = doc.content;
 	doc.topic = topic;
 	doc.content = content;
 	doc.title = extractPaperTitle(content, topic);
+	// Lock AI baseline once (legacy papers use pre-edit content).
+	if (!doc.aiBaselineContent) {
+		doc.aiBaselineContent = previousContent || content;
+	}
+	doc.humanEdited = content.trim() !== String(doc.aiBaselineContent).trim();
 	await doc.save();
 
 	return toSavedResearchDto(doc);
 }
 
 export async function deleteSavedResearch(id: string, userId?: string | null): Promise<boolean> {
-	if (!Types.ObjectId.isValid(id)) return false;
+	if (!userId || !Types.ObjectId.isValid(id)) return false;
 
 	const doc = await SavedResearchModel.findById(id);
-	if (!doc) return false;
-
-	const ownerId = doc.userId?.toString() ?? null;
-	if (userId) {
-		if (ownerId && ownerId !== userId) return false;
-	} else if (ownerId) {
-		return false;
-	}
+	if (!doc || !canAccessSavedResearch(doc, userId)) return false;
 
 	const result = await SavedResearchModel.findByIdAndDelete(id);
 	return Boolean(result);
 }
 
 export async function deleteAllSavedResearch(userId?: string | null): Promise<number> {
-	const filter: Record<string, unknown> = userId
-		? { userId: new Types.ObjectId(userId) }
-		: { $or: [{ userId: { $exists: false } }, { userId: null }] };
-	const result = await SavedResearchModel.deleteMany(filter);
+	if (!userId) return 0;
+	const result = await SavedResearchModel.deleteMany({ userId: new Types.ObjectId(userId) });
 	return result.deletedCount;
 }
 

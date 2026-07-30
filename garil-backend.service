@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=www-data
 Group=www-data
-WorkingDirectory=/var/www/garila-backend
+WorkingDirectory=/var/www/garil-ai/backend
 
 Environment=NODE_ENV=production
-EnvironmentFile=-/var/www/garila-backend/.env
+EnvironmentFile=-/var/www/garil-ai/backend/.env
 
 ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
@@ -21,7 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/www/garila-backend/backups
+ReadWritePaths=/var/www/garil-ai/backend/backups
 
 [Install]
 WantedBy=multi-user.target

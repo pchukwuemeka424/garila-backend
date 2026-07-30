@@ -1,7 +1,6 @@
 import { Types } from "mongoose";
 
 import { hashPassword } from "../lib/password.js";
-import { buildTokenQuota } from "../constants/student-tokens.js";
 import { MessageModel } from "../db/models/Message.js";
 import { SessionModel } from "../db/models/Session.js";
 import { enrichSessionsWithOwnership } from "./session-enrichment.service.js";
@@ -12,9 +11,25 @@ import {
 	isSuperAdminRole,
 	universityFilterForScope,
 } from "../lib/require-admin.js";
+import {
+	getUniversityTokenDefaultsMap,
+	quotaForUser,
+	type UniversityTokenDefaults,
+} from "./token-quota.service.js";
 
-const CONSOLE_ROLES = new Set(["admin", "governance_admin", "faculty_admin", "auditor"]);
-const UNI_ADMIN_ROLES = new Set(["governance_admin", "faculty_admin", "auditor"]);
+const CONSOLE_ROLES = new Set([
+	"admin",
+	"governance_admin",
+	"faculty_admin",
+	"department_admin",
+	"compliance_officer",
+	"data_protection_officer",
+	"research_integrity_officer",
+	"auditor",
+]);
+const UNI_ADMIN_ROLES = new Set(
+	[...CONSOLE_ROLES].filter((role) => role !== "admin"),
+);
 
 export async function getDashboardStats(scope?: AdminScope) {
 	const userFilter = scope ? universityFilterForScope(scope) : {};
@@ -50,22 +65,31 @@ export async function getDashboardStats(scope?: AdminScope) {
 	};
 }
 
-function mapUserRecord(user: {
-	_id: { toString(): string };
-	name: string;
-	email: string;
-	role: string;
-	status: string;
-	department?: string | null;
-	institution?: string | null;
-	universityId?: Types.ObjectId | null;
-	faculty?: string | null;
-	programme?: string | null;
-	cohort?: string | null;
-	lastActiveAt?: Date | null;
-	createdAt: Date;
-	tokensUsed?: number | null;
-}) {
+function mapUserRecord(
+	user: {
+		_id: { toString(): string };
+		name: string;
+		email: string;
+		role: string;
+		status: string;
+		department?: string | null;
+		institution?: string | null;
+		universityId?: Types.ObjectId | null;
+		faculty?: string | null;
+		programme?: string | null;
+		cohort?: string | null;
+		lastActiveAt?: Date | null;
+		createdAt: Date;
+		updatedAt?: Date;
+		tokensUsed?: number | null;
+		tokenAllowance?: number | null;
+		suspensionReason?: string | null;
+		invitedBy?: Types.ObjectId | null;
+		invitedAt?: Date | null;
+		complianceFlags?: string[] | null;
+	},
+	defaultsByUniversity?: Map<string, UniversityTokenDefaults>,
+) {
 	return {
 		id: user._id.toString(),
 		name: user.name,
@@ -80,14 +104,21 @@ function mapUserRecord(user: {
 		cohort: user.cohort ?? null,
 		lastActiveAt: user.lastActiveAt?.toISOString() ?? null,
 		createdAt: user.createdAt.toISOString(),
-		tokenQuota: buildTokenQuota(user.role, user.tokensUsed ?? 0),
+		updatedAt: user.updatedAt?.toISOString() ?? user.createdAt.toISOString(),
+		tokenQuota: quotaForUser(user, defaultsByUniversity),
+		tokenAllowance: user.tokenAllowance ?? null,
+		suspensionReason: user.suspensionReason ?? null,
+		invitedBy: user.invitedBy ? user.invitedBy.toString() : null,
+		invitedAt: user.invitedAt?.toISOString() ?? null,
+		complianceFlags: user.complianceFlags ?? [],
 	};
 }
 
 export async function listUsers(scope?: AdminScope) {
 	const filter = scope ? universityFilterForScope(scope) : {};
 	const users = await UserModel.find(filter).sort({ createdAt: -1 }).lean();
-	return users.map(mapUserRecord);
+	const defaults = await getUniversityTokenDefaultsMap(users.map((u) => u.universityId));
+	return users.map((u) => mapUserRecord(u, defaults));
 }
 
 export async function listConsoleAdmins() {
@@ -96,7 +127,20 @@ export async function listConsoleAdmins() {
 	})
 		.sort({ createdAt: -1 })
 		.lean();
-	return users.map(mapUserRecord);
+	const defaults = await getUniversityTokenDefaultsMap(users.map((u) => u.universityId));
+	return users.map((u) => mapUserRecord(u, defaults));
+}
+
+export async function getAdminUserById(id: string, scope?: AdminScope) {
+	if (!Types.ObjectId.isValid(id)) return null;
+	const filter: Record<string, unknown> = { _id: new Types.ObjectId(id) };
+	if (scope?.kind === "university") {
+		Object.assign(filter, universityFilterForScope(scope));
+	}
+	const user = await UserModel.findOne(filter).lean();
+	if (!user) return null;
+	const defaults = await getUniversityTokenDefaultsMap([user.universityId]);
+	return mapUserRecord(user, defaults);
 }
 
 async function resolveUniversityFields(input: {
@@ -170,8 +214,13 @@ export async function createUser(
 		throw new Error("University admins must be assigned to a university.");
 	}
 
+	if (role !== "admin" && !universityId && scope?.kind === "platform") {
+		throw new Error("universityId is required for non–super-admin accounts.");
+	}
+
 	const uniFields = await resolveUniversityFields({ universityId, institution });
 	const passwordHash = input.password ? await hashPassword(input.password) : undefined;
+	const isInvite = !passwordHash && scope?.actorId && Types.ObjectId.isValid(scope.actorId);
 
 	const user = await UserModel.create({
 		name: input.name.trim(),
@@ -185,8 +234,12 @@ export async function createUser(
 		programme: input.programme?.trim(),
 		cohort: input.cohort?.trim(),
 		...(passwordHash ? { passwordHash } : {}),
+		...(isInvite
+			? { invitedBy: new Types.ObjectId(scope!.actorId), invitedAt: new Date() }
+			: {}),
 	});
-	return mapUserRecord(user.toObject());
+	const defaults = await getUniversityTokenDefaultsMap([user.universityId]);
+	return mapUserRecord(user.toObject(), defaults);
 }
 
 export async function updateUser(
@@ -202,6 +255,7 @@ export async function updateUser(
 		faculty: string;
 		programme: string;
 		cohort: string;
+		suspensionReason: string | null;
 	}>,
 	scope?: AdminScope,
 ) {
@@ -252,6 +306,24 @@ export async function updateUser(
 		}
 	}
 
+	const nextStatus = input.status ?? existing.status;
+	let suspensionUpdate: Record<string, unknown> = {};
+	if (input.status !== undefined || input.suspensionReason !== undefined) {
+		if (nextStatus === "suspended") {
+			const reason =
+				input.suspensionReason !== undefined
+					? input.suspensionReason?.trim() || null
+					: existing.suspensionReason ?? null;
+			suspensionUpdate = { suspensionReason: reason };
+		} else if (input.status !== undefined && nextStatus !== "suspended") {
+			suspensionUpdate = { suspensionReason: null };
+		} else if (input.suspensionReason !== undefined) {
+			suspensionUpdate = {
+				suspensionReason: input.suspensionReason?.trim() || null,
+			};
+		}
+	}
+
 	const user = await UserModel.findByIdAndUpdate(
 		id,
 		{
@@ -264,6 +336,7 @@ export async function updateUser(
 			...(input.programme !== undefined ? { programme: input.programme.trim() } : {}),
 			...(input.cohort !== undefined ? { cohort: input.cohort.trim() } : {}),
 			...uniUpdate,
+			...suspensionUpdate,
 			...(nextRole === "admin" ? { universityId: null } : {}),
 		},
 		{ new: true, runValidators: true },
@@ -271,12 +344,17 @@ export async function updateUser(
 
 	if (!user) return null;
 
-	return mapUserRecord(user);
+	const defaults = await getUniversityTokenDefaultsMap([user.universityId]);
+	return mapUserRecord(user, defaults);
 }
 
 export async function deleteUser(id: string, scope?: AdminScope) {
 	const existing = await UserModel.findById(id).lean();
 	if (!existing) return false;
+
+	if (scope?.actorId && scope.actorId === id) {
+		throw new Error("You cannot delete your own account.");
+	}
 
 	if (scope?.kind === "university") {
 		if (!existing.universityId || existing.universityId.toString() !== scope.universityId) {

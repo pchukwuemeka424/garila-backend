@@ -125,13 +125,30 @@ import {
 	listUsersTokenQuotas,
 	bulkResetUserTokens,
 	resetUserTokens,
+	setUserTokenAllowance,
 	setUserTokensUsed,
 } from "./services/admin-tokens.service.js";
+import {
+	bulkDeleteAdminResearchNotebooks,
+	bulkDeleteAdminResearchPapers,
+	bulkDeleteAdminResearchUploads,
+	deleteAdminResearchNotebook,
+	deleteAdminResearchPaper,
+	deleteAdminResearchUpload,
+	getAdminResearchNotebook,
+	getAdminResearchPaper,
+	getAdminResearchStats,
+	listAdminResearchNotebooks,
+	listAdminResearchPapers,
+	listAdminResearchUploads,
+	type AdminResearchUploadKind,
+} from "./services/admin-research.service.js";
 import {
 	bulkDeleteUsers,
 	bulkUpdateUserStatus,
 	createUser as adminCreateUser,
 	deleteUser as adminDeleteUser,
+	getAdminUserById,
 	getDashboardStats as adminGetDashboardStats,
 	listConsoleAdmins as adminListConsoleAdmins,
 	listRecentSessions as adminListRecentSessions,
@@ -141,8 +158,10 @@ import {
 	updateUser as adminUpdateUser,
 } from "./services/admin-users.service.js";
 import {
+	getUniversityRecord,
 	listActiveUniversitiesForRegistration,
 	listUniversities as adminListUniversities,
+	offboardUniversity,
 	onboardUniversity,
 	updateUniversity,
 } from "./services/admin-universities.service.js";
@@ -319,6 +338,17 @@ function resolveStaticHtml(staticRoot: string, urlPath: string): string | null {
 			return candidate;
 		}
 	}
+
+	// Pretty university detail URLs: /super-admin/universities/:slug
+	// Serve the static detail shell so client can read the slug from the path.
+	const uniDetailMatch = normalized.match(/^\/super-admin\/universities\/([^/]+)$/);
+	if (uniDetailMatch && uniDetailMatch[1] !== "detail") {
+		const detailHtml = join(staticRoot, "super-admin/universities/detail/index.html");
+		if (existsSync(detailHtml) && statSync(detailHtml).isFile()) {
+			return detailHtml;
+		}
+	}
+
 	return null;
 }
 
@@ -400,10 +430,30 @@ export async function startServer(port: number): Promise<void> {
 		return { ok: true, version: ctx.version, s3 };
 	});
 
-	/** Public: institutions that are onboarded and allowed to self-register. */
-	app.get("/api/auth/universities", async () => ({
-		universities: await listActiveUniversitiesForRegistration(),
-	}));
+	/** Public: institutions that are onboarded and allowed to self-register (optionally by country). */
+	app.get("/api/auth/universities", async (request) => {
+		const query = request.query as { country?: string };
+		return {
+			universities: await listActiveUniversitiesForRegistration(query.country),
+		};
+	});
+
+	/** Public: full university catalogue by country (UK, US, etc.). Nigeria uses the local catalogue on the client. */
+	app.get("/api/auth/universities/catalogue", async (request, reply) => {
+		const query = request.query as { country?: string };
+		const country = query.country?.trim().toUpperCase() ?? "";
+		if (!country) {
+			return reply.code(400).send({ error: "Country is required." });
+		}
+		try {
+			const { listUniversitiesForCountry } = await import("./services/world-universities.service.js");
+			const universities = await listUniversitiesForCountry(country);
+			return { universities };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
 
 	app.post("/api/auth/register", async (request, reply) => {
 		const body = request.body as {
@@ -413,6 +463,7 @@ export async function startServer(port: number): Promise<void> {
 			department?: string;
 			institution?: string;
 			catalogueId?: string;
+			country?: string;
 		};
 		if (!body.name?.trim() || !body.email?.trim() || !body.password || !body.department?.trim()) {
 			return reply.code(400).send({ error: "Name, email, password, and department are required." });
@@ -425,6 +476,7 @@ export async function startServer(port: number): Promise<void> {
 				department: body.department,
 				institution: body.institution,
 				catalogueId: body.catalogueId,
+				country: body.country,
 			});
 			return result;
 		} catch (error) {
@@ -441,6 +493,7 @@ export async function startServer(port: number): Promise<void> {
 			department?: string;
 			institution?: string;
 			catalogueId?: string;
+			country?: string;
 		};
 		if (!body.name?.trim() || !body.email?.trim() || !body.password || !body.department?.trim()) {
 			return reply.code(400).send({ error: "Name, email, password, and program are required." });
@@ -453,6 +506,7 @@ export async function startServer(port: number): Promise<void> {
 				department: body.department,
 				institution: body.institution,
 				catalogueId: body.catalogueId,
+				country: body.country,
 			});
 			return result;
 		} catch (error) {
@@ -857,8 +911,11 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.get("/api/research/saved", async (request) => {
+	app.get("/api/research/saved", async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
 		const papers = await listSavedResearch(userId);
 		return { papers };
 	});
@@ -922,6 +979,9 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get<{ Params: { id: string } }>("/api/research/saved/:id", async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
 		const paper = await getSavedResearchById(request.params.id, userId);
 		if (!paper) {
 			return reply.code(404).send({ error: "Saved research not found." });
@@ -936,6 +996,9 @@ export async function startServer(port: number): Promise<void> {
 		}
 		try {
 			const userId = await resolveUserId(request.headers.authorization);
+			if (!userId) {
+				return reply.code(401).send({ error: "Authentication required." });
+			}
 			const paper = await updateSavedResearchById(request.params.id, body, userId);
 			if (!paper) {
 				return reply.code(404).send({ error: "Saved research not found." });
@@ -953,6 +1016,12 @@ export async function startServer(port: number): Promise<void> {
 			content?: string;
 			sessionId?: string;
 			workflow?: string;
+			sources?: {
+				documentIds?: string[];
+				datasetIds?: string[];
+				noteIds?: string[];
+				projectIds?: string[];
+			};
 			tokenUsage?: {
 				promptTokens?: number;
 				completionTokens?: number;
@@ -964,6 +1033,9 @@ export async function startServer(port: number): Promise<void> {
 		}
 		try {
 			const userId = await resolveUserId(request.headers.authorization);
+			if (!userId) {
+				return reply.code(401).send({ error: "Authentication required." });
+			}
 			const tokenUsage =
 				body.tokenUsage &&
 				typeof body.tokenUsage.promptTokens === "number" &&
@@ -983,6 +1055,7 @@ export async function startServer(port: number): Promise<void> {
 				content: body.content,
 				workflow: body.workflow,
 				tokenUsage,
+				sources: body.sources,
 			});
 			return { paper };
 		} catch (error) {
@@ -991,25 +1064,23 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.delete("/api/research/saved", async (request) => {
+	app.delete("/api/research/saved", async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Authentication required." });
+		}
 		const deleted = await deleteAllSavedResearch(userId);
 		return { ok: true, deleted };
 	});
 
 	app.delete<{ Params: { id: string } }>("/api/research/saved/:id", async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) {
+			return reply.code(401).send({ error: "Sign in to remove research saved to your account." });
+		}
 		const deleted = await deleteSavedResearch(request.params.id, userId);
 		if (!deleted) {
-			const status = userId ? 404 : 403;
-			return reply
-				.code(status)
-				.send({
-					error:
-						status === 403
-							? "Sign in to remove research saved to your account."
-							: "Saved research not found.",
-				});
+			return reply.code(404).send({ error: "Saved research not found." });
 		}
 		return { ok: true };
 	});
@@ -1907,6 +1978,21 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
+	app.get<{ Params: { id: string } }>("/api/admin/users/:id", async (request, reply) => {
+		try {
+			const scope = await requireAdminScope(request.headers.authorization);
+			const user = await getAdminUserById(request.params.id, scope);
+			if (!user) return reply.code(404).send({ error: "User not found." });
+			return { user };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
 	app.get("/api/admin/admins", async (request, reply) => {
 		try {
 			await requireSuperAdmin(request.headers.authorization);
@@ -1933,12 +2019,28 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
+	app.get<{ Params: { id: string } }>("/api/admin/universities/:id", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const university = await getUniversityRecord(request.params.id);
+			if (!university) return reply.code(404).send({ error: "University not found." });
+			return { university };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
 	app.post("/api/admin/universities", async (request, reply) => {
 		try {
 			const adminId = await requireSuperAdmin(request.headers.authorization);
 			const body = request.body as {
 				catalogueId?: string;
 				name?: string;
+				country?: string;
 				status?: "active" | "inactive";
 			};
 			if (!body.catalogueId?.trim() || !body.name?.trim()) {
@@ -1947,6 +2049,7 @@ export async function startServer(port: number): Promise<void> {
 			const university = await onboardUniversity({
 				catalogueId: body.catalogueId,
 				name: body.name,
+				country: body.country ?? "NG",
 				status: body.status ?? "active",
 				onboardedBy: adminId,
 			});
@@ -1972,7 +2075,12 @@ export async function startServer(port: number): Promise<void> {
 	app.patch<{ Params: { id: string } }>("/api/admin/universities/:id", async (request, reply) => {
 		try {
 			const adminId = await requireSuperAdmin(request.headers.authorization);
-			const body = request.body as Partial<{ name: string; status: "active" | "inactive" }>;
+			const body = request.body as Partial<{
+				name: string;
+				status: "active" | "inactive";
+				defaultStudentTokens: number | null;
+				defaultLecturerTokens: number | null;
+			}>;
 			const university = await updateUniversity(request.params.id, body, adminId);
 			if (!university) return reply.code(404).send({ error: "University not found." });
 			await recordAuditEvent({
@@ -1983,6 +2091,10 @@ export async function startServer(port: number): Promise<void> {
 				targetType: "university",
 				targetId: university.id,
 				severity: "low",
+				details: {
+					defaultStudentTokens: university.defaultStudentTokens,
+					defaultLecturerTokens: university.defaultLecturerTokens,
+				},
 			});
 			return { university };
 		} catch (error) {
@@ -1993,6 +2105,48 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(400).send({ error: message });
 		}
 	});
+
+	const offboardUniversityHandler = async (
+		request: { headers: { authorization?: string }; params: { id: string }; body: unknown; query: unknown },
+		reply: { code: (status: number) => { send: (payload: unknown) => unknown } },
+	) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const body = (request.body as { confirmName?: string } | null) ?? {};
+			const confirmName =
+				body.confirmName ??
+				(request.query as { confirmName?: string }).confirmName ??
+				"";
+			const result = await offboardUniversity(request.params.id, confirmName);
+			await recordAuditEvent({
+				action: "admin.university_offboarded",
+				category: "admin",
+				actorId: adminId,
+				summary: result.hardDeleted
+					? `Hard-deleted university ${request.params.id}`
+					: `Offboarded university ${result.university?.name ?? request.params.id} (suspended ${result.suspendedUsers} users)`,
+				targetType: "university",
+				targetId: request.params.id,
+				severity: "high",
+			});
+			return result;
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	};
+
+	app.delete<{ Params: { id: string } }>(
+		"/api/admin/universities/:id",
+		offboardUniversityHandler,
+	);
+	app.post<{ Params: { id: string } }>(
+		"/api/admin/universities/:id/offboard",
+		offboardUniversityHandler,
+	);
 
 	app.post("/api/admin/users", async (request, reply) => {
 		try {
@@ -2053,6 +2207,7 @@ export async function startServer(port: number): Promise<void> {
 				faculty: string;
 				programme: string;
 				cohort: string;
+				suspensionReason: string | null;
 			}>;
 			const user = await adminUpdateUser(request.params.id, body, scope);
 			if (!user) return reply.code(404).send({ error: "User not found." });
@@ -2112,11 +2267,15 @@ export async function startServer(port: number): Promise<void> {
 	app.post("/api/admin/users/bulk-status", async (request, reply) => {
 		try {
 			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as { ids?: string[]; status?: "active" | "inactive" | "suspended" };
+			const body = request.body as {
+				ids?: string[];
+				status?: "active" | "inactive" | "suspended";
+				suspensionReason?: string;
+			};
 			if (!body.ids?.length || !body.status) {
 				return reply.code(400).send({ error: "ids and status are required." });
 			}
-			return await bulkUpdateUserStatus(body.ids, body.status, scope);
+			return await bulkUpdateUserStatus(body.ids, body.status, scope, body.suspensionReason);
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
 				return reply.code(error.statusCode).send({ error: error.message });
@@ -2209,17 +2368,238 @@ export async function startServer(port: number): Promise<void> {
 	app.patch<{ Params: { id: string } }>("/api/admin/tokens/:id", async (request, reply) => {
 		try {
 			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as { reset?: boolean; tokensUsed?: number };
+			const body = request.body as {
+				reset?: boolean;
+				tokensUsed?: number;
+				tokenAllowance?: number | null;
+			};
 			let record;
 			if (body.reset) {
 				record = await resetUserTokens(request.params.id, scope);
+			} else if (body.tokenAllowance !== undefined) {
+				record = await setUserTokenAllowance(request.params.id, body.tokenAllowance, scope);
 			} else if (body.tokensUsed !== undefined) {
 				record = await setUserTokensUsed(request.params.id, body.tokensUsed, scope);
 			} else {
-				return reply.code(400).send({ error: "Provide reset: true or tokensUsed." });
+				return reply
+					.code(400)
+					.send({ error: "Provide reset: true, tokensUsed, or tokenAllowance." });
 			}
 			if (!record) return reply.code(404).send({ error: "User not found." });
 			return { user: record };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/research/stats", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const query = request.query as { universityId?: string };
+			const stats = await getAdminResearchStats(query.universityId || null);
+			return { stats };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/research/papers", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const query = request.query as { universityId?: string; limit?: string };
+			const papers = await listAdminResearchPapers({
+				universityId: query.universityId || null,
+				limit: query.limit ? Number(query.limit) : undefined,
+			});
+			return { papers };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get<{ Params: { id: string } }>("/api/admin/research/papers/:id", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const paper = await getAdminResearchPaper(request.params.id);
+			if (!paper) return reply.code(404).send({ error: "Research paper not found." });
+			return { paper };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.delete<{ Params: { id: string } }>("/api/admin/research/papers/:id", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const ok = await deleteAdminResearchPaper(request.params.id, adminId);
+			if (!ok) return reply.code(404).send({ error: "Research paper not found." });
+			return { ok: true };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.post("/api/admin/research/papers/bulk-delete", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const body = request.body as { ids?: string[] };
+			if (!body.ids?.length) return reply.code(400).send({ error: "ids are required." });
+			const deleted = await bulkDeleteAdminResearchPapers(body.ids, adminId);
+			return { deleted };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/research/notebooks", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const query = request.query as { universityId?: string; limit?: string };
+			const notebooks = await listAdminResearchNotebooks({
+				universityId: query.universityId || null,
+				limit: query.limit ? Number(query.limit) : undefined,
+			});
+			return { notebooks };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get<{ Params: { id: string } }>("/api/admin/research/notebooks/:id", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const notebook = await getAdminResearchNotebook(request.params.id);
+			if (!notebook) return reply.code(404).send({ error: "Research notebook not found." });
+			return { notebook };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.delete<{ Params: { id: string } }>("/api/admin/research/notebooks/:id", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const ok = await deleteAdminResearchNotebook(request.params.id, adminId);
+			if (!ok) return reply.code(404).send({ error: "Research notebook not found." });
+			return { ok: true };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.post("/api/admin/research/notebooks/bulk-delete", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const body = request.body as { ids?: string[] };
+			if (!body.ids?.length) return reply.code(400).send({ error: "ids are required." });
+			const deleted = await bulkDeleteAdminResearchNotebooks(body.ids, adminId);
+			return { deleted };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/research/uploads", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const query = request.query as {
+				universityId?: string;
+				limit?: string;
+				kind?: string;
+			};
+			const kindRaw = query.kind?.trim();
+			const kind =
+				kindRaw === "document" || kindRaw === "dataset" || kindRaw === "all"
+					? kindRaw
+					: "all";
+			const uploads = await listAdminResearchUploads({
+				universityId: query.universityId || null,
+				limit: query.limit ? Number(query.limit) : undefined,
+				kind,
+			});
+			return { uploads };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.delete<{ Params: { kind: string; id: string } }>(
+		"/api/admin/research/uploads/:kind/:id",
+		async (request, reply) => {
+			try {
+				const adminId = await requireSuperAdmin(request.headers.authorization);
+				const kind = request.params.kind;
+				if (kind !== "document" && kind !== "dataset") {
+					return reply.code(400).send({ error: "kind must be document or dataset." });
+				}
+				const ok = await deleteAdminResearchUpload(
+					request.params.id,
+					kind as AdminResearchUploadKind,
+					adminId,
+				);
+				if (!ok) return reply.code(404).send({ error: "Upload not found." });
+				return { ok: true };
+			} catch (error) {
+				if (error instanceof AdminRequiredError) {
+					return reply.code(error.statusCode).send({ error: error.message });
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				return reply.code(500).send({ error: message });
+			}
+		},
+	);
+
+	app.post("/api/admin/research/uploads/bulk-delete", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const body = request.body as { items?: Array<{ id: string; kind: AdminResearchUploadKind }> };
+			if (!body.items?.length) return reply.code(400).send({ error: "items are required." });
+			const deleted = await bulkDeleteAdminResearchUploads(body.items, adminId);
+			return { deleted };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
 				return reply.code(error.statusCode).send({ error: error.message });

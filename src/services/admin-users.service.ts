@@ -7,6 +7,7 @@ import { universityFilterForScope } from "../lib/require-admin.js";
 import {
 	createUser,
 	deleteUser,
+	getAdminUserById,
 	getDashboardStats,
 	listConsoleAdmins,
 	listRecentSessions,
@@ -21,6 +22,7 @@ export {
 	listRecentSessionTopics,
 	listUsers,
 	listConsoleAdmins,
+	getAdminUserById,
 	createUser,
 	updateUser,
 	deleteUser,
@@ -59,13 +61,20 @@ export async function bulkUpdateUserStatus(
 	ids: string[],
 	status: "active" | "inactive" | "suspended",
 	scope?: AdminScope,
+	suspensionReason?: string | null,
 ) {
 	if (ids.length === 0) return { updated: 0 };
 	const filter: Record<string, unknown> = {
 		_id: { $in: ids.map((id) => new Types.ObjectId(id)) },
 		...universityFilterForScope(scope ?? { kind: "platform", actorId: "", role: "admin" }),
 	};
-	const result = await UserModel.updateMany(filter, { status });
+	const update: Record<string, unknown> = { status };
+	if (status === "suspended") {
+		update.suspensionReason = suspensionReason?.trim() || null;
+	} else {
+		update.suspensionReason = null;
+	}
+	const result = await UserModel.updateMany(filter, update);
 	return { updated: result.modifiedCount };
 }
 

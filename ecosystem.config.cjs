@@ -1,9 +1,13 @@
-/** PM2 — standalone backend. From repo root: `pm2 start ecosystem.config.cjs` */
+/** PM2 — backend API only. From repo root: `pm2 start deploy/backend/ecosystem.config.cjs` */
+const path = require("node:path");
+
+const root = path.resolve(__dirname, "../..");
+
 module.exports = {
 	apps: [
 		{
 			name: "garil-backend",
-			cwd: __dirname,
+			cwd: path.join(root, "backend"),
 			script: "dist/index.js",
 			interpreter: "node",
 			instances: 1,
