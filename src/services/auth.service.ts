@@ -2,8 +2,9 @@ import { Types } from "mongoose";
 
 import type { StudentTokenQuota } from "../constants/student-tokens.js";
 import { UserModel, type UserDocument } from "../db/models/User.js";
-import { hashPassword, verifyPassword } from "../lib/password.js";
 import { signAuthToken } from "../lib/auth-token.js";
+import { isFreeEmail, LECTURER_FREE_EMAIL_ERROR } from "../lib/email.js";
+import { hashPassword, verifyPassword } from "../lib/password.js";
 import {
 	getActiveUniversityByCatalogueId,
 	isUniversityActive,
@@ -173,6 +174,7 @@ export async function registerLecturer(input: {
 
 	if (name.length < 2) throw new Error("Please enter your full name.");
 	if (!validateEmail(email)) throw new Error("Please enter a valid email address.");
+	if (isFreeEmail(email)) throw new Error(LECTURER_FREE_EMAIL_ERROR);
 	if (input.password.length < 8) throw new Error("Password must be at least 8 characters.");
 	if (department.length < 2) throw new Error("Please enter your department or faculty.");
 

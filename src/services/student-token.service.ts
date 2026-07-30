@@ -29,7 +29,7 @@ export async function assertStudentHasTokenBalance(userId: string): Promise<void
 	if (!quota) return;
 	if (quota.remaining <= 0) {
 		throw new Error(
-			`You have used all ${quota.allowance.toLocaleString()} research tokens. Contact support for more.`,
+			`Your research token allowance (${quota.allowance.toLocaleString()}) has been exhausted. Please contact your university to request a reset.`,
 		);
 	}
 }
