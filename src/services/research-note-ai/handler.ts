@@ -1,5 +1,5 @@
 import { getOpenRouterModel } from "../../config/env.js";
-import { completeOpenRouterChat, type ChatTurn } from "../llm.service.js";
+import { completeOpenRouterChat, friendlyLlmError, type ChatTurn } from "../llm.service.js";
 import type { ChatMessage } from "./types.js";
 
 /**
@@ -57,9 +57,10 @@ export async function handleGenerate(request: Request): Promise<Response> {
 			200,
 		);
 	} catch (err) {
-		const message = err instanceof Error ? err.message : "Generation failed";
-		const status = /OPENROUTER_API_KEY/i.test(message) ? 503 : 502;
-		return json({ error: message }, status);
+		const raw = err instanceof Error ? err.message : "Generation failed";
+		const friendly = friendlyLlmError(err);
+		const status = /OPENROUTER_API_KEY/i.test(raw) ? 503 : 502;
+		return json({ error: friendly.message }, status);
 	}
 }
 
