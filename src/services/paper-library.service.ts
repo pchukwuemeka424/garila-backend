@@ -257,5 +257,10 @@ export async function upsertPapersIntoLibrary(
 
 export function libraryHasEnoughHits(count: number, limit: number): boolean {
 	const minHits = Math.min(getPaperLibraryMinHits(), limit);
+	/** Large banks (chat-paper ≥25 refs) need near-full coverage before skipping live APIs. */
+	if (limit >= 25) {
+		const required = Math.min(limit, Math.max(minHits, 25));
+		return count >= required;
+	}
 	return count >= minHits;
 }

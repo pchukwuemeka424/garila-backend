@@ -12,6 +12,8 @@ export type ResearchJobDto = {
 	sessionId: string | null;
 	topic: string;
 	status: ResearchJobStatus;
+	/** 0–100 generation progress. */
+	progress: number;
 	savedResearchId: string | null;
 	error: string | null;
 	createdAt: string;
@@ -23,12 +25,17 @@ const ACTIVE_STATUSES: ResearchJobStatus[] = ["queued", "running"];
 /** In-process runners keyed by job id — used for cancel; not durable across restarts. */
 const runners = new Map<string, ChatService>();
 
+function clampProgress(n: number): number {
+	return Math.max(0, Math.min(100, Math.round(n)));
+}
+
 function toDto(doc: {
 	_id: Types.ObjectId;
 	userId: Types.ObjectId;
 	sessionId?: Types.ObjectId | null;
 	topic: string;
 	status: string;
+	progress?: number | null;
 	savedResearchId?: Types.ObjectId | null;
 	error?: string | null;
 	createdAt: Date;
@@ -40,11 +47,18 @@ function toDto(doc: {
 		sessionId: doc.sessionId?.toString() ?? null,
 		topic: doc.topic,
 		status: doc.status as ResearchJobStatus,
+		progress: clampProgress(doc.progress ?? 0),
 		savedResearchId: doc.savedResearchId?.toString() ?? null,
 		error: doc.error ?? null,
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
 	};
+}
+
+async function setJobProgress(jobId: string, progress: number): Promise<void> {
+	await ResearchJobModel.findByIdAndUpdate(jobId, {
+		progress: clampProgress(progress),
+	});
 }
 
 export async function failOrphanedResearchJobs(): Promise<number> {
@@ -91,8 +105,59 @@ async function runPaperJob(input: {
 	const chat = new ChatService(input.ctx);
 	runners.set(input.jobId, chat);
 
+	let progress = 20;
+	let lastPersisted = 20;
+	let streamTicks = 0;
+
+	const bump = (next: number) => {
+		const clamped = clampProgress(Math.max(progress, next));
+		if (clamped <= progress && clamped !== 100) return;
+		progress = clamped;
+		// Throttle DB writes during fast stream deltas.
+		if (clamped - lastPersisted < 2 && clamped < 95 && clamped !== 100) return;
+		lastPersisted = clamped;
+		void setJobProgress(input.jobId, clamped);
+	};
+
+	const unsubscribe = chat.subscribe((payload) => {
+		if (payload.type !== "agent_event") return;
+		const event = payload.event as { type?: string; toolName?: string } | undefined;
+		if (!event?.type) return;
+
+		if (event.type === "tool_execution_start" && event.toolName === "alphaxiv_search") {
+			bump(28);
+			return;
+		}
+		if (event.type === "tool_execution_end" && event.toolName === "alphaxiv_search") {
+			bump(40);
+			return;
+		}
+		if (event.type === "agent_start") {
+			bump(45);
+			return;
+		}
+		if (event.type === "message_update") {
+			streamTicks += 1;
+			// Climb from ~45 toward 92 as the paper streams.
+			bump(Math.min(92, 45 + streamTicks * 0.35));
+			return;
+		}
+		if (event.type === "message_end") {
+			bump(94);
+		}
+	});
+
+	const creepTimer = setInterval(() => {
+		if (progress >= 90) return;
+		bump(progress + 1);
+	}, 2500);
+
 	try {
-		await ResearchJobModel.findByIdAndUpdate(input.jobId, { status: "running", error: null });
+		await ResearchJobModel.findByIdAndUpdate(input.jobId, {
+			status: "running",
+			progress: 20,
+			error: null,
+		});
 
 		await chat.resetSession({
 			workflow: "chat-paper",
@@ -107,6 +172,7 @@ async function runPaperJob(input: {
 			});
 		}
 
+		bump(25);
 		await chat.sendMessage(input.prompt, input.userId);
 
 		const current = await ResearchJobModel.findById(input.jobId).lean();
@@ -116,6 +182,7 @@ async function runPaperJob(input: {
 		if (savedResearchId) {
 			await ResearchJobModel.findByIdAndUpdate(input.jobId, {
 				status: "completed",
+				progress: 100,
 				savedResearchId: new Types.ObjectId(savedResearchId),
 				error: null,
 			});
@@ -137,6 +204,8 @@ async function runPaperJob(input: {
 			error: isAbort ? "Research generation was cancelled." : message,
 		});
 	} finally {
+		clearInterval(creepTimer);
+		unsubscribe();
 		runners.delete(input.jobId);
 	}
 }
@@ -160,6 +229,7 @@ export async function startResearchPaperJob(input: {
 		userId: new Types.ObjectId(input.userId),
 		topic,
 		status: "queued",
+		progress: 20,
 	});
 
 	const jobId = created._id.toString();

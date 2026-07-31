@@ -232,7 +232,8 @@ export async function generateResearchOutline(
 		.join(" ");
 
 	const fast = Boolean(input.fast || input.sourceContext?.trim());
-	const paperLimit = fast ? 4 : 8;
+	/** Outline needs themes/sources, not the full 30-paper cite bank (chat-paper re-fetches that). */
+	const paperLimit = fast ? 4 : 15;
 	const maxTokens = fast ? 2200 : 4000;
 
 	const papers = await fetchPapersForQuery(searchQuery, { limit: paperLimit, signal: options?.signal });

@@ -218,6 +218,7 @@ export function formatPapersForContext(
 		return `No papers were found via ${sourceLabel} for "${query}". Use cautious language and cite well-known sources in the field.`;
 	}
 
+	const abstractBudget = papers.length >= 25 ? 320 : 600;
 	const lines = papers.map((paper, index) => {
 		const authorLine =
 			paper.authors.length > 0
@@ -226,7 +227,7 @@ export function formatPapersForContext(
 		const year = paper.publicationDate ? new Date(paper.publicationDate).getFullYear() : "n.d.";
 		const title = paper.title.replace(/\*/g, "");
 		const abstract = paper.abstract
-			? paper.abstract.replace(/\s+/g, " ").slice(0, 600)
+			? paper.abstract.replace(/\s+/g, " ").slice(0, abstractBudget)
 			: "Abstract unavailable.";
 
 		return [
@@ -238,11 +239,18 @@ export function formatPapersForContext(
 		].join("\n");
 	});
 
+	const minRefsInstruction =
+		papers.length >= 25
+			? `Cite and write from at least 25 of these papers throughout Introduction, Literature Review, Discussion, and other body sections (prefer more when the bank is larger). References must list every bank paper cited in the body (≥25 entries).`
+			: `Cite and write from all ${papers.length} of these papers in the body when possible. References must list every bank paper cited in the body. Do not invent filler references.`;
+
 	return [
 		`${sourceLabel} retrieved ${papers.length} real paper(s) for the query "${query}".`,
 		"Use these as primary literature sources. Cite by author and year in the body.",
+		minRefsInstruction,
+		"Paraphrase and synthesize bank abstracts into literature claims — do not pad the References list without in-text cites.",
 		"In the References section, embed each title as [*Title*](url). Never mention preprint servers, repository names, or paper ID numbers.",
-		"Do not invent papers outside this list unless clearly marked as general background.",
+		"Do not invent papers outside this list.",
 		"",
 		...lines,
 	].join("\n");
@@ -276,6 +284,75 @@ async function fetchPapersFromExternalApis(
 	query: string,
 	options?: { limit?: number; signal?: AbortSignal },
 ): Promise<PaperSearchResult> {
+	const limit = options?.limit ?? DEFAULT_LIMIT;
+	const needLargeBank = limit >= 25;
+
+	/** Large banks: fetch AlphaXiv + arXiv in parallel and merge (avoids sequential 20s timeouts). */
+	if (needLargeBank) {
+		const started = Date.now();
+		const tasks: Array<Promise<{ papers: AlphaXivPaper[]; source: PaperSearchSource }>> = [];
+
+		if (isAlphaXivEnabled()) {
+			tasks.push(
+				searchPapers(query, options)
+					.then((papers) => ({ papers, source: "alphaxiv" as const }))
+					.catch(() => ({ papers: [] as AlphaXivPaper[], source: "none" as const })),
+			);
+		}
+
+		tasks.push(
+			searchArxivPapers(query, options)
+				.then((papers) => ({ papers, source: "arxiv" as const }))
+				.catch(() => ({ papers: [] as AlphaXivPaper[], source: "none" as const })),
+		);
+
+		const settled = await Promise.all(tasks);
+		let merged: AlphaXivPaper[] = [];
+		const sourcesUsed: PaperSearchSource[] = [];
+
+		for (const result of settled) {
+			if (result.papers.length === 0) continue;
+			sourcesUsed.push(result.source);
+			merged = mergeUniquePapers(merged, result.papers, limit);
+			if (merged.length >= limit) break;
+		}
+
+		if (merged.length < limit) {
+			try {
+				const tavily = await searchTavilyPapers(query, {
+					...options,
+					limit: limit - merged.length,
+				});
+				if (tavily.length > 0) {
+					sourcesUsed.push("tavily");
+					merged = mergeUniquePapers(merged, tavily, limit);
+				}
+			} catch {
+				/* keep what we have */
+			}
+		}
+
+		if (merged.length === 0 && getAlphaXivApiKey()) {
+			try {
+				const mcpPapers = await searchPapersViaMcp(query, options);
+				if (mcpPapers.length > 0) {
+					sourcesUsed.push("alphaxiv-mcp");
+					merged = mcpPapers.slice(0, limit);
+				}
+			} catch {
+				/* no papers */
+			}
+		}
+
+		const source: PaperSearchSource =
+			sourcesUsed.length > 1 ? "hybrid" : (sourcesUsed[0] ?? "none");
+		console.info(
+			`[literature] large-bank query="${query.slice(0, 80)}" limit=${limit} got=${merged.length} source=${source} ms=${Date.now() - started}`,
+		);
+		return { papers: merged, source };
+	}
+
+	/** Default path: first successful source (small banks). */
 	let papers: AlphaXivPaper[] = [];
 	let source: PaperSearchSource = "none";
 

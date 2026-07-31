@@ -145,7 +145,7 @@ export async function searchTavilyPapers(
 	const apiKey = getTavilyApiKey();
 	if (!apiKey) return [];
 
-	const limit = Math.min(Math.max(options?.limit ?? 8, 1), 20);
+	const limit = Math.min(Math.max(options?.limit ?? 8, 1), 30);
 	const searchQuery =
 		trimmed.length > 360 ? `${trimmed.slice(0, 360)} scholarly research` : `${trimmed} scholarly research paper`;
 

@@ -150,8 +150,11 @@ export class ChatService {
 		});
 
 		try {
+			const isChatPaper =
+				(options.workflow ?? "").replace(/^\//, "") === "chat-paper";
 			const result = await buildPaperSearchContext(query, {
 				signal: this.abortController?.signal,
+				...(isChatPaper ? { limit: 30 } : {}),
 			});
 
 			this.emit({

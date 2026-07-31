@@ -13,6 +13,7 @@ const researchJobSchema = new Schema(
 		},
 		savedResearchId: { type: Schema.Types.ObjectId, ref: "SavedResearch" },
 		error: { type: String },
+		progress: { type: Number, default: 0, min: 0, max: 100 },
 		notifiedAt: { type: Date },
 	},
 	{ timestamps: true },
