@@ -162,6 +162,7 @@ import {
 	listActiveUniversitiesForRegistration,
 	listUniversities as adminListUniversities,
 	offboardUniversity,
+	onboardUniversitiesBulk,
 	onboardUniversity,
 	updateUniversity,
 } from "./services/admin-universities.service.js";
@@ -2063,6 +2064,51 @@ export async function startServer(port: number): Promise<void> {
 				severity: "medium",
 			});
 			return { university };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
+	app.post("/api/admin/universities/bulk", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const body = request.body as {
+				country?: string;
+				status?: "active" | "inactive";
+				universities?: Array<{ catalogueId?: string; name?: string }>;
+			};
+			const universities = (body.universities ?? [])
+				.filter((u) => u.catalogueId?.trim() && u.name?.trim())
+				.map((u) => ({ catalogueId: u.catalogueId!.trim(), name: u.name!.trim() }));
+			if (universities.length === 0) {
+				return reply.code(400).send({ error: "universities array with catalogueId and name is required." });
+			}
+			const result = await onboardUniversitiesBulk({
+				country: body.country ?? "NG",
+				status: body.status ?? "active",
+				universities,
+				onboardedBy: adminId,
+			});
+			await recordAuditEvent({
+				action: "admin.universities_bulk_onboarded",
+				category: "admin",
+				actorId: adminId,
+				summary: `Bulk onboarded ${(body.country ?? "NG").toUpperCase()}: ${result.created} created, ${result.updated} updated, ${result.failed} failed`,
+				targetType: "university",
+				severity: "medium",
+				details: {
+					country: (body.country ?? "NG").toUpperCase(),
+					created: result.created,
+					updated: result.updated,
+					failed: result.failed,
+					total: result.total,
+				},
+			});
+			return { result };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
 				return reply.code(error.statusCode).send({ error: error.message });

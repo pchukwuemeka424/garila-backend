@@ -206,6 +206,70 @@ export async function onboardUniversity(input: {
 	return toRecord(created.toObject());
 }
 
+export type BulkOnboardResult = {
+	created: number;
+	updated: number;
+	failed: number;
+	total: number;
+	errors: Array<{ catalogueId: string; error: string }>;
+};
+
+/** Idempotent bulk onboard — upserts each catalogue entry as active. */
+export async function onboardUniversitiesBulk(input: {
+	country?: string;
+	universities: Array<{ catalogueId: string; name: string }>;
+	status?: "active" | "inactive";
+	onboardedBy: string;
+}): Promise<BulkOnboardResult> {
+	const items = input.universities ?? [];
+	if (items.length === 0) throw new Error("At least one university is required.");
+	if (items.length > 5000) throw new Error("Bulk onboard is limited to 5000 universities per request.");
+
+	const country = (input.country?.trim().toUpperCase() || "NG").slice(0, 2);
+	const status = input.status ?? "active";
+	const result: BulkOnboardResult = {
+		created: 0,
+		updated: 0,
+		failed: 0,
+		total: items.length,
+		errors: [],
+	};
+
+	const seen = new Set<string>();
+	for (const item of items) {
+		const catalogueId = item.catalogueId?.trim().toLowerCase() ?? "";
+		if (!catalogueId || seen.has(catalogueId)) {
+			if (!catalogueId) {
+				result.failed += 1;
+				result.errors.push({ catalogueId: "", error: "catalogueId is required." });
+			}
+			continue;
+		}
+		seen.add(catalogueId);
+
+		const existed = await UniversityModel.exists({ catalogueId });
+		try {
+			await onboardUniversity({
+				catalogueId,
+				name: item.name,
+				country,
+				status,
+				onboardedBy: input.onboardedBy,
+			});
+			if (existed) result.updated += 1;
+			else result.created += 1;
+		} catch (err) {
+			result.failed += 1;
+			result.errors.push({
+				catalogueId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	return result;
+}
+
 export async function updateUniversity(
 	idOrSlug: string,
 	input: Partial<{
