@@ -164,6 +164,7 @@ import {
 	offboardUniversity,
 	onboardUniversitiesBulk,
 	onboardUniversity,
+	bulkUpdateUniversityTokenDefaults,
 	updateUniversity,
 } from "./services/admin-universities.service.js";
 import {
@@ -2106,6 +2107,58 @@ export async function startServer(port: number): Promise<void> {
 					updated: result.updated,
 					failed: result.failed,
 					total: result.total,
+				},
+			});
+			return { result };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
+	app.post("/api/admin/universities/token-defaults", async (request, reply) => {
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const body = request.body as {
+				scope?: "all" | "country" | "university";
+				country?: string;
+				universityId?: string;
+				defaultStudentTokens?: number | null;
+				defaultLecturerTokens?: number | null;
+			};
+			if (!body.scope) {
+				return reply.code(400).send({ error: "scope is required (all, country, or university)." });
+			}
+			const result = await bulkUpdateUniversityTokenDefaults({
+				scope: body.scope,
+				country: body.country,
+				universityId: body.universityId,
+				defaultStudentTokens: body.defaultStudentTokens,
+				defaultLecturerTokens: body.defaultLecturerTokens,
+			});
+			await recordAuditEvent({
+				action: "admin.university_token_defaults_bulk",
+				category: "admin",
+				actorId: adminId,
+				summary:
+					result.scope === "all"
+						? `Set token defaults on all universities (${result.updated})`
+						: result.scope === "country"
+							? `Set token defaults on ${result.country} universities (${result.updated})`
+							: `Set token defaults on university ${result.universityId}`,
+				targetType: "university",
+				targetId: result.universityId ?? result.country ?? "all",
+				severity: "medium",
+				details: {
+					scope: result.scope,
+					country: result.country,
+					universityId: result.universityId,
+					updated: result.updated,
+					defaultStudentTokens: result.defaultStudentTokens,
+					defaultLecturerTokens: result.defaultLecturerTokens,
 				},
 			});
 			return { result };

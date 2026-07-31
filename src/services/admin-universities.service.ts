@@ -304,20 +304,99 @@ export async function updateUniversity(
 		}
 	}
 	if (input.defaultStudentTokens !== undefined) {
-		uni.defaultStudentTokens =
-			input.defaultStudentTokens == null || input.defaultStudentTokens <= 0
-				? null
-				: Math.round(input.defaultStudentTokens);
+		uni.defaultStudentTokens = normalizeTokenDefault(input.defaultStudentTokens);
 	}
 	if (input.defaultLecturerTokens !== undefined) {
-		uni.defaultLecturerTokens =
-			input.defaultLecturerTokens == null || input.defaultLecturerTokens <= 0
-				? null
-				: Math.round(input.defaultLecturerTokens);
+		uni.defaultLecturerTokens = normalizeTokenDefault(input.defaultLecturerTokens);
 	}
 	await uni.save();
 	const counts = await countsForUniversities([uni._id]);
 	return toRecord(uni.toObject(), counts.get(uni._id.toString()));
+}
+
+function normalizeTokenDefault(value: number | null | undefined): number | null {
+	if (value == null || value <= 0) return null;
+	return Math.round(value);
+}
+
+export type BulkTokenDefaultsResult = {
+	updated: number;
+	scope: "all" | "country" | "university";
+	country: string | null;
+	universityId: string | null;
+	defaultStudentTokens: number | null;
+	defaultLecturerTokens: number | null;
+};
+
+/**
+ * Apply default student/lecturer allowances across all universities,
+ * all universities in a country, or a single university.
+ * Users without a personal tokenAllowance pick these up immediately.
+ */
+export async function bulkUpdateUniversityTokenDefaults(input: {
+	scope: "all" | "country" | "university";
+	country?: string;
+	universityId?: string;
+	defaultStudentTokens?: number | null;
+	defaultLecturerTokens?: number | null;
+}): Promise<BulkTokenDefaultsResult> {
+	if (input.defaultStudentTokens === undefined && input.defaultLecturerTokens === undefined) {
+		throw new Error("Provide defaultStudentTokens and/or defaultLecturerTokens.");
+	}
+
+	const patch: Record<string, number | null> = {};
+	if (input.defaultStudentTokens !== undefined) {
+		patch.defaultStudentTokens = normalizeTokenDefault(input.defaultStudentTokens);
+	}
+	if (input.defaultLecturerTokens !== undefined) {
+		patch.defaultLecturerTokens = normalizeTokenDefault(input.defaultLecturerTokens);
+	}
+
+	let filter: Record<string, unknown> = {};
+	let country: string | null = null;
+	let universityId: string | null = null;
+
+	if (input.scope === "university") {
+		const key = input.universityId?.trim() ?? "";
+		if (!key) throw new Error("universityId is required for university scope.");
+		universityId = key;
+		if (!(Types.ObjectId.isValid(key) && String(new Types.ObjectId(key)) === key)) {
+			throw new Error("Invalid universityId.");
+		}
+		filter = { _id: new Types.ObjectId(key) };
+	} else if (input.scope === "country") {
+		const code = (input.country?.trim().toUpperCase() || "").slice(0, 2);
+		if (!code) throw new Error("country is required for country scope.");
+		country = code;
+		filter =
+			code === "NG"
+				? {
+						$or: [
+							{ country: "NG" },
+							{ country: { $exists: false } },
+							{ country: null },
+							{ country: "" },
+						],
+					}
+				: { country: code };
+	} else if (input.scope !== "all") {
+		throw new Error("scope must be all, country, or university.");
+	}
+
+	const result = await UniversityModel.updateMany(filter, { $set: patch });
+	if (input.scope === "university" && result.matchedCount === 0) {
+		throw new Error("University not found.");
+	}
+	return {
+		updated: result.matchedCount,
+		scope: input.scope,
+		country,
+		universityId,
+		defaultStudentTokens:
+			input.defaultStudentTokens !== undefined ? (patch.defaultStudentTokens ?? null) : null,
+		defaultLecturerTokens:
+			input.defaultLecturerTokens !== undefined ? (patch.defaultLecturerTokens ?? null) : null,
+	};
 }
 
 export type UniversityDetailRecord = UniversityRecord & {
