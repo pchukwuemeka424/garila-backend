@@ -192,7 +192,7 @@ export async function searchPaperLibrary(
 export async function upsertPapersIntoLibrary(
 	papers: LibraryPaper[],
 	query: string,
-	source: "alphaxiv" | "arxiv" | "alphaxiv-mcp" | "tavily",
+	source: "alphaxiv" | "arxiv" | "openalex" | "pubmed" | "alphaxiv-mcp" | "tavily",
 ): Promise<void> {
 	if (!isPaperLibraryEnabled() || papers.length === 0) return;
 

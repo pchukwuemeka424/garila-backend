@@ -173,9 +173,13 @@ export class ChatService {
 							? "Tavily literature retrieval"
 							: result.source === "arxiv"
 								? "arXiv literature retrieval"
-								: result.source === "alphaxiv-mcp"
-									? "AlphaXiv MCP literature retrieval"
-									: "AlphaXiv literature retrieval";
+								: result.source === "openalex"
+									? "OpenAlex literature retrieval"
+									: result.source === "pubmed"
+										? "PubMed literature retrieval"
+										: result.source === "alphaxiv-mcp"
+											? "AlphaXiv MCP literature retrieval"
+											: "AlphaXiv literature retrieval";
 			const contextBlock = `[${retrievalLabel}]\n\n${result.context}`;
 			const systemIndex = history.findIndex((turn) => turn.role === "system");
 			if (systemIndex < 0) return history;

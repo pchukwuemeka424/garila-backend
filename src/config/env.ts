@@ -105,6 +105,33 @@ export function isTavilyEnabled(): boolean {
 	return process.env.TAVILY_ENABLED !== "false";
 }
 
+export function getOpenAlexApiKey(): string | null {
+	return process.env.OPENALEX_API_KEY?.trim() || null;
+}
+
+export function getOpenAlexApiBase(): string {
+	return process.env.OPENALEX_API_BASE?.trim() || "https://api.openalex.org";
+}
+
+export function isOpenAlexEnabled(): boolean {
+	return process.env.OPENALEX_ENABLED !== "false";
+}
+
+export function getPubmedApiKey(): string | null {
+	return process.env.PUBMED_API_KEY?.trim() || process.env.NCBI_API_KEY?.trim() || null;
+}
+
+export function getPubmedApiBase(): string {
+	return (
+		process.env.PUBMED_API_BASE?.trim() ||
+		"https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+	);
+}
+
+export function isPubmedEnabled(): boolean {
+	return process.env.PUBMED_ENABLED !== "false";
+}
+
 /** Local paper library RAG — check Mongo before AlphaXiv/arXiv/Tavily. */
 export function isPaperLibraryEnabled(): boolean {
 	return process.env.PAPER_LIBRARY_ENABLED !== "false";

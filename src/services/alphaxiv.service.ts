@@ -2,16 +2,24 @@ import {
 	getAlphaXivApiBase,
 	getAlphaXivApiKey,
 	getAlphaXivMcpUrl,
+	getOpenAlexApiKey,
+	getPubmedApiKey,
+	getTavilyApiKey,
 	isAlphaXivEnabled,
+	isOpenAlexEnabled,
 	isPaperLibraryEnabled,
+	isPubmedEnabled,
+	isTavilyEnabled,
 } from "../config/env.js";
 import { searchArxivPapers } from "./arxiv.service.js";
+import { searchOpenAlexPapers } from "./openalex.service.js";
 import {
 	libraryHasEnoughHits,
 	mergeUniquePapers,
 	searchPaperLibrary,
 	upsertPapersIntoLibrary,
 } from "./paper-library.service.js";
+import { searchPubmedPapers } from "./pubmed.service.js";
 import { searchTavilyPapers } from "./tavily.service.js";
 
 export type AlphaXivPaper = {
@@ -261,6 +269,8 @@ export type PaperSearchSource =
 	| "hybrid"
 	| "alphaxiv"
 	| "arxiv"
+	| "openalex"
+	| "pubmed"
 	| "alphaxiv-mcp"
 	| "tavily"
 	| "none";
@@ -270,9 +280,11 @@ const PAPER_SOURCE_LABELS: Record<PaperSearchSource, string> = {
 	hybrid: "Paper library + live literature",
 	alphaxiv: "AlphaXiv",
 	arxiv: "arXiv",
+	openalex: "OpenAlex",
+	pubmed: "PubMed",
 	"alphaxiv-mcp": "AlphaXiv MCP",
 	tavily: "Tavily",
-	none: "AlphaXiv/arXiv/Tavily",
+	none: "OpenAlex/PubMed/AlphaXiv/arXiv/Tavily",
 };
 
 export type PaperSearchResult = {
@@ -280,118 +292,190 @@ export type PaperSearchResult = {
 	source: PaperSearchSource;
 };
 
+type LivePaperSource = Exclude<PaperSearchSource, "library" | "hybrid" | "none">;
+
+type LiteratureProvider = {
+	source: LivePaperSource;
+	available: () => boolean;
+	search: (
+		query: string,
+		options?: { limit?: number; signal?: AbortSignal },
+	) => Promise<AlphaXivPaper[]>;
+};
+
+const LITERATURE_PROVIDERS: LiteratureProvider[] = [
+	{
+		source: "alphaxiv",
+		available: () => isAlphaXivEnabled(),
+		search: searchPapers,
+	},
+	{
+		source: "arxiv",
+		available: () => true,
+		search: searchArxivPapers,
+	},
+	{
+		source: "openalex",
+		available: () => isOpenAlexEnabled() && Boolean(getOpenAlexApiKey()),
+		search: searchOpenAlexPapers,
+	},
+	{
+		source: "pubmed",
+		available: () => isPubmedEnabled() && Boolean(getPubmedApiKey()),
+		search: searchPubmedPapers,
+	},
+	{
+		source: "alphaxiv-mcp",
+		available: () => isAlphaXivEnabled() && Boolean(getAlphaXivApiKey()),
+		search: searchPapersViaMcp,
+	},
+	{
+		source: "tavily",
+		available: () => isTavilyEnabled() && Boolean(getTavilyApiKey()),
+		search: searchTavilyPapers,
+	},
+];
+
+/** Core scholarly APIs — mixed into every citation bank when available. */
+const CORE_SCHOLARLY_SOURCES = new Set<LivePaperSource>([
+	"alphaxiv",
+	"arxiv",
+	"openalex",
+	"pubmed",
+]);
+
+function shuffleProviders<T>(items: T[]): T[] {
+	const next = [...items];
+	for (let i = next.length - 1; i > 0; i -= 1) {
+		const j = Math.floor(Math.random() * (i + 1));
+		const tmp = next[i]!;
+		next[i] = next[j]!;
+		next[j] = tmp;
+	}
+	return next;
+}
+
+function availableProviders(): LiteratureProvider[] {
+	return LITERATURE_PROVIDERS.filter((provider) => provider.available());
+}
+
+function paperDedupKey(paper: AlphaXivPaper): string {
+	if (paper.arxivId?.trim()) return `arxiv:${paper.arxivId.trim().toLowerCase()}`;
+	const title = paper.title
+		.toLowerCase()
+		.replace(/[^\w\s]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (title) return `title:${title}`;
+	return `id:${paper.id}`;
+}
+
+/** Round-robin merge so one API cannot dominate references / in-text cites. */
+function interleaveUniquePapers(
+	batches: Array<{ source: LivePaperSource; papers: AlphaXivPaper[] }>,
+	limit: number,
+): { papers: AlphaXivPaper[]; sourcesUsed: LivePaperSource[] } {
+	const seen = new Set<string>();
+	const out: AlphaXivPaper[] = [];
+	const sourcesUsed: LivePaperSource[] = [];
+	const queues = batches
+		.filter((batch) => batch.papers.length > 0)
+		.map((batch) => ({ source: batch.source, papers: [...batch.papers] }));
+
+	while (out.length < limit && queues.length > 0) {
+		for (let i = 0; i < queues.length && out.length < limit; ) {
+			const queue = queues[i]!;
+			const next = queue.papers.shift();
+			if (!next) {
+				queues.splice(i, 1);
+				continue;
+			}
+			const key = paperDedupKey(next);
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			out.push(next);
+			if (!sourcesUsed.includes(queue.source)) sourcesUsed.push(queue.source);
+			i += 1;
+		}
+	}
+
+	return { papers: out, sourcesUsed };
+}
+
+/**
+ * Mix randomly ordered research APIs into the citation bank (references + in-text cites).
+ * Always samples multiple scholarly sources when available — never fills the whole bank from one API.
+ */
 async function fetchPapersFromExternalApis(
 	query: string,
 	options?: { limit?: number; signal?: AbortSignal },
 ): Promise<PaperSearchResult> {
 	const limit = options?.limit ?? DEFAULT_LIMIT;
-	const needLargeBank = limit >= 25;
+	const all = availableProviders();
+	if (all.length === 0) {
+		return { papers: [], source: "none" };
+	}
 
-	/** Large banks: fetch AlphaXiv + arXiv in parallel and merge (avoids sequential 20s timeouts). */
-	if (needLargeBank) {
-		const started = Date.now();
-		const tasks: Array<Promise<{ papers: AlphaXivPaper[]; source: PaperSearchSource }>> = [];
+	const started = Date.now();
+	const core = shuffleProviders(all.filter((p) => CORE_SCHOLARLY_SOURCES.has(p.source)));
+	const fallbacks = shuffleProviders(all.filter((p) => !CORE_SCHOLARLY_SOURCES.has(p.source)));
 
-		if (isAlphaXivEnabled()) {
-			tasks.push(
-				searchPapers(query, options)
-					.then((papers) => ({ papers, source: "alphaxiv" as const }))
-					.catch(() => ({ papers: [] as AlphaXivPaper[], source: "none" as const })),
-			);
-		}
+	/** Use every available core API (random order). Fall back to a single provider only if that is all we have. */
+	const mixTargets =
+		core.length > 0
+			? core
+			: shuffleProviders(all).slice(0, Math.min(2, all.length));
 
-		tasks.push(
-			searchArxivPapers(query, options)
-				.then((papers) => ({ papers, source: "arxiv" as const }))
-				.catch(() => ({ papers: [] as AlphaXivPaper[], source: "none" as const })),
+	const perProviderLimit = Math.max(
+		Math.ceil(limit / Math.max(mixTargets.length, 1)) + 2,
+		Math.min(limit, 12),
+	);
+
+	const settled = await Promise.all(
+		mixTargets.map((provider) =>
+			provider
+				.search(query, { ...options, limit: perProviderLimit })
+				.then((papers) => ({ source: provider.source, papers }))
+				.catch(() => ({ source: provider.source, papers: [] as AlphaXivPaper[] })),
+		),
+	);
+
+	let { papers, sourcesUsed } = interleaveUniquePapers(settled, limit);
+
+	console.info(
+		`[literature] mix-apis query="${query.slice(0, 80)}" limit=${limit} cores=${mixTargets.map((p) => p.source).join("+")} hits=${settled.map((s) => `${s.source}:${s.papers.length}`).join(",")} mixed=${papers.length}`,
+	);
+
+	if (papers.length < limit && fallbacks.length > 0) {
+		const fill = await Promise.all(
+			fallbacks.map((provider) =>
+				provider
+					.search(query, { ...options, limit: limit - papers.length })
+					.then((hits) => ({ source: provider.source, papers: hits }))
+					.catch(() => ({ source: provider.source, papers: [] as AlphaXivPaper[] })),
+			),
 		);
-
-		const settled = await Promise.all(tasks);
-		let merged: AlphaXivPaper[] = [];
-		const sourcesUsed: PaperSearchSource[] = [];
-
-		for (const result of settled) {
-			if (result.papers.length === 0) continue;
-			sourcesUsed.push(result.source);
-			merged = mergeUniquePapers(merged, result.papers, limit);
-			if (merged.length >= limit) break;
-		}
-
-		if (merged.length < limit) {
-			try {
-				const tavily = await searchTavilyPapers(query, {
-					...options,
-					limit: limit - merged.length,
-				});
-				if (tavily.length > 0) {
-					sourcesUsed.push("tavily");
-					merged = mergeUniquePapers(merged, tavily, limit);
-				}
-			} catch {
-				/* keep what we have */
+		const seen = new Set(papers.map(paperDedupKey));
+		for (const batch of fill) {
+			if (batch.papers.length === 0) continue;
+			if (!sourcesUsed.includes(batch.source)) sourcesUsed.push(batch.source);
+			for (const paper of batch.papers) {
+				if (papers.length >= limit) break;
+				const key = paperDedupKey(paper);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				papers.push(paper);
 			}
 		}
-
-		if (merged.length === 0 && getAlphaXivApiKey()) {
-			try {
-				const mcpPapers = await searchPapersViaMcp(query, options);
-				if (mcpPapers.length > 0) {
-					sourcesUsed.push("alphaxiv-mcp");
-					merged = mcpPapers.slice(0, limit);
-				}
-			} catch {
-				/* no papers */
-			}
-		}
-
-		const source: PaperSearchSource =
-			sourcesUsed.length > 1 ? "hybrid" : (sourcesUsed[0] ?? "none");
-		console.info(
-			`[literature] large-bank query="${query.slice(0, 80)}" limit=${limit} got=${merged.length} source=${source} ms=${Date.now() - started}`,
-		);
-		return { papers: merged, source };
 	}
 
-	/** Default path: first successful source (small banks). */
-	let papers: AlphaXivPaper[] = [];
-	let source: PaperSearchSource = "none";
-
-	if (isAlphaXivEnabled()) {
-		try {
-			papers = await searchPapers(query, options);
-			if (papers.length > 0) source = "alphaxiv";
-		} catch {
-			/* fall through to arXiv / Tavily */
-		}
-	}
-
-	if (papers.length === 0) {
-		try {
-			papers = await searchArxivPapers(query, options);
-			if (papers.length > 0) source = "arxiv";
-		} catch {
-			/* fall through */
-		}
-	}
-
-	if (papers.length === 0 && getAlphaXivApiKey()) {
-		try {
-			papers = await searchPapersViaMcp(query, options);
-			if (papers.length > 0) source = "alphaxiv-mcp";
-		} catch {
-			/* fall through */
-		}
-	}
-
-	if (papers.length === 0) {
-		try {
-			papers = await searchTavilyPapers(query, options);
-			if (papers.length > 0) source = "tavily";
-		} catch {
-			/* no papers */
-		}
-	}
-
+	const source: PaperSearchSource =
+		sourcesUsed.length > 1 ? "hybrid" : (sourcesUsed[0] ?? "none");
+	console.info(
+		`[literature] mixed-api query="${query.slice(0, 80)}" limit=${limit} got=${papers.length} source=${source} used=${sourcesUsed.join("+")} ms=${Date.now() - started}`,
+	);
 	return { papers, source };
 }
 
@@ -403,20 +487,22 @@ export async function fetchPapersForQueryDetailed(
 	if (!trimmed) return { papers: [], source: "none" };
 
 	const limit = options?.limit ?? DEFAULT_LIMIT;
+	/** Large citation banks must mix live APIs — library alone is usually one historical source. */
+	const requireLiveMix = limit >= 25;
 
-	/** 1) Library-first RAG — reuse previously retrieved publications. */
+	/** 1) Library-first RAG — reuse previously retrieved publications (small banks only). */
 	const libraryPapers = isPaperLibraryEnabled()
 		? await searchPaperLibrary(trimmed, { limit })
 		: [];
 
-	if (libraryHasEnoughHits(libraryPapers.length, limit)) {
+	if (!requireLiveMix && libraryHasEnoughHits(libraryPapers.length, limit)) {
 		return {
 			papers: libraryPapers.slice(0, limit),
 			source: "library",
 		};
 	}
 
-	/** 2) Live APIs when the local library does not cover the query. */
+	/** 2) Live APIs — always for large banks; otherwise when the library is thin. */
 	const external = await fetchPapersFromExternalApis(trimmed, { ...options, limit });
 
 	if (
@@ -434,10 +520,14 @@ export async function fetchPapersForQueryDetailed(
 		return external;
 	}
 
-	const merged = mergeUniquePapers(libraryPapers, external.papers, limit);
+	const merged = mergeUniquePapers(
+		requireLiveMix ? external.papers : libraryPapers,
+		requireLiveMix ? libraryPapers : external.papers,
+		limit,
+	);
 	return {
 		papers: merged,
-		source: external.papers.length > 0 ? "hybrid" : "library",
+		source: external.papers.length > 0 ? (libraryPapers.length > 0 ? "hybrid" : external.source) : "library",
 	};
 }
 

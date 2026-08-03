@@ -35,8 +35,8 @@ const SECTION_ALIASES: Record<string, (typeof STANDARD_RESEARCH_SECTIONS)[number
 	methodology: "Methodology",
 	methods: "Methodology",
 	method: "Methodology",
-	"research design": "Methodology",
 	"materials and methods": "Methodology",
+	"materials & methods": "Methodology",
 	results: "Results / Analysis",
 	analysis: "Results / Analysis",
 	findings: "Results / Analysis",
@@ -66,12 +66,41 @@ export function canonicalizeSectionTitle(raw: string): string | null {
 
 const BOLD_SECTION_LINE = /^\*\*([^*\n]+)\*\*\s*$/;
 
+/** Collapse consecutive identical IMRaD headings (Methodology + Methods → one Methodology). */
+function dedupeConsecutiveSectionHeadings(content: string): string {
+	const lines = content.replace(/\r/g, "").split("\n");
+	const out: string[] = [];
+	let lastCanonical: string | null = null;
+
+	for (const line of lines) {
+		const trimmed = line.trim();
+		const bold = trimmed.match(/^\*\*([^*\n]+)\*\*\s*$/);
+		if (bold) {
+			const canonical = canonicalizeSectionTitle(bold[1] ?? "");
+			if (canonical && (STANDARD_RESEARCH_SECTIONS as readonly string[]).includes(canonical)) {
+				if (lastCanonical === canonical) continue;
+				lastCanonical = canonical;
+				out.push(`**${canonical}**`);
+				continue;
+			}
+			lastCanonical = null;
+			out.push(line);
+			continue;
+		}
+		if (trimmed) lastCanonical = null;
+		out.push(line);
+	}
+
+	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /** Map alternate section labels to standard IMRaD headings. */
 export function standardizeResearchSectionHeadings(content: string): string {
-	return content.replace(BOLD_SECTION_LINE, (line, title: string) => {
+	const canonicalized = content.replace(BOLD_SECTION_LINE, (line, title: string) => {
 		const canonical = canonicalizeSectionTitle(title);
 		return canonical ? `**${canonical}**` : line;
 	});
+	return dedupeConsecutiveSectionHeadings(canonicalized);
 }
 
 const HAS_SECTION = (name: string) => new RegExp(`^\\*\\*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\*\\*\\s*$`, "im");

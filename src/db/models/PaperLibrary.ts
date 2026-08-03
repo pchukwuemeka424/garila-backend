@@ -14,7 +14,7 @@ const paperLibrarySchema = new Schema(
 		queryTags: { type: [String], default: [] },
 		source: {
 			type: String,
-			enum: ["alphaxiv", "arxiv", "alphaxiv-mcp", "tavily", "manual"],
+			enum: ["alphaxiv", "arxiv", "openalex", "pubmed", "alphaxiv-mcp", "tavily", "manual"],
 			default: "alphaxiv",
 		},
 		hitCount: { type: Number, default: 1 },
