@@ -8,6 +8,7 @@ import {
 	universityObjectId,
 } from "../lib/admin-scope.js";
 import { recordAuditEvent } from "./admin-audit.service.js";
+import { createAlert } from "./admin-alerts.service.js";
 
 export type PolicyEffect = "permitted" | "restricted" | "blocked";
 export type PolicyScope = "feature" | "dataset" | "tool" | "use_case" | "content";
@@ -216,6 +217,7 @@ export async function evaluatePolicy(
 		faculty?: string | null;
 	},
 	adminScope?: AdminScope,
+	actorId?: string,
 ): Promise<PolicyEvaluation> {
 	const policies = await GovernancePolicyModel.find({
 		...scopeFilter(adminScope),
@@ -234,12 +236,34 @@ export async function evaluatePolicy(
 			faculties.length === 0 ||
 			(!input.faculty ? false : faculties.some((f) => f.toLowerCase() === input.faculty!.toLowerCase()));
 		if (roleOk && (faculties.length === 0 || facultyOk)) {
-			return {
+			const evaluation: PolicyEvaluation = {
 				effect: policy.effect as PolicyEffect,
 				matchedPolicyId: policy._id.toString(),
 				matchedPolicyName: policy.name,
 				reason: policy.description || `Matched policy “${policy.name}”.`,
 			};
+			if (evaluation.effect === "blocked" || evaluation.effect === "restricted") {
+				await createAlert(
+					{
+						title: `Policy ${evaluation.effect}: ${policy.name}`,
+						summary: `${evaluation.reason} Target “${input.target}” (${input.scope}) for role ${input.role}${input.faculty ? ` in ${input.faculty}` : ""}.`,
+						kind: "policy_violation",
+						severity: evaluation.effect === "blocked" ? "high" : "medium",
+						faculty: input.faculty ?? undefined,
+						actorRole: input.role,
+						context: {
+							policyId: evaluation.matchedPolicyId,
+							policyName: evaluation.matchedPolicyName,
+							effect: evaluation.effect,
+							target: input.target,
+							scope: input.scope,
+						},
+					},
+					actorId,
+					adminScope,
+				);
+			}
+			return evaluation;
 		}
 	}
 

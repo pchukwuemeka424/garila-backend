@@ -3,6 +3,7 @@ import { Types } from "mongoose";
 import { ResearchJobModel } from "../db/models/ResearchJob.js";
 import type { AppContext } from "../lib/app-context.js";
 import { ChatService } from "./chat.service.js";
+import { attachSavedResearchSources, injectSavedFiguresIntoSavedPaper } from "./research.service.js";
 
 export type ResearchJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -101,6 +102,14 @@ async function runPaperJob(input: {
 	userId: string;
 	topic: string;
 	prompt: string;
+	figureDocumentIds: string[];
+	sources?: {
+		documentIds?: string[];
+		datasetIds?: string[];
+		questionnaireIds?: string[];
+		noteIds?: string[];
+		projectIds?: string[];
+	} | null;
 }): Promise<void> {
 	const chat = new ChatService(input.ctx);
 	runners.set(input.jobId, chat);
@@ -180,6 +189,22 @@ async function runPaperJob(input: {
 
 		const savedResearchId = chat.getLastSavedResearchId();
 		if (savedResearchId) {
+			if (input.figureDocumentIds.length) {
+				try {
+					await injectSavedFiguresIntoSavedPaper(
+						savedResearchId,
+						input.userId,
+						input.figureDocumentIds,
+					);
+				} catch {
+					/* Paper is still usable without attached figures. */
+				}
+			}
+			try {
+				await attachSavedResearchSources(savedResearchId, input.userId, input.sources);
+			} catch {
+				/* Paper is still usable without source ids. */
+			}
 			await ResearchJobModel.findByIdAndUpdate(input.jobId, {
 				status: "completed",
 				progress: 100,
@@ -215,6 +240,14 @@ export async function startResearchPaperJob(input: {
 	userId: string;
 	prompt: string;
 	topic?: string;
+	figureDocumentIds?: string[];
+	sources?: {
+		documentIds?: string[];
+		datasetIds?: string[];
+		questionnaireIds?: string[];
+		noteIds?: string[];
+		projectIds?: string[];
+	} | null;
 }): Promise<ResearchJobDto> {
 	const prompt = input.prompt.trim();
 	if (!prompt) throw new Error("Prompt is required.");
@@ -224,12 +257,18 @@ export async function startResearchPaperJob(input: {
 		throw new Error("A research paper is already generating. Wait for it to finish or cancel it.");
 	}
 
+	const figureDocumentIds = (input.figureDocumentIds ?? [])
+		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
+		.slice(0, 8);
+
 	const topic = (input.topic?.trim() || prompt.slice(0, 200)).trim();
 	const created = await ResearchJobModel.create({
 		userId: new Types.ObjectId(input.userId),
 		topic,
 		status: "queued",
 		progress: 20,
+		figureDocumentIds,
+		...(input.sources ? { sources: input.sources } : {}),
 	});
 
 	const jobId = created._id.toString();
@@ -241,6 +280,8 @@ export async function startResearchPaperJob(input: {
 		userId: input.userId,
 		topic,
 		prompt,
+		figureDocumentIds,
+		sources: input.sources,
 	});
 
 	return toDto(created);

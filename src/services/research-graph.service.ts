@@ -2,14 +2,68 @@ import { Types } from "mongoose";
 
 import { getOpenRouterFastModel } from "../config/env.js";
 import { ResearchDatasetModel } from "../db/models/ResearchDataset.js";
-import { ResearchProjectModel } from "../db/models/ResearchProject.js";
+import { ResearchDocumentModel } from "../db/models/ResearchDocument.js";
+import { isImageFile, MAX_PAPER_FIGURES } from "../lib/research-figure-blocks.js";
 import {
 	hasStoredAttachment,
 	loadAttachmentDataUrl,
 } from "./attachment-storage.service.js";
 import { completeOpenRouterChat } from "./llm.service.js";
 
-export type GraphChartType = "bar" | "line" | "area" | "pie" | "scatter";
+export type GraphChartType =
+	| "bar"
+	| "stacked_bar"
+	| "horizontal_bar"
+	| "line"
+	| "area"
+	| "composed"
+	| "scatter"
+	| "bubble"
+	| "pie"
+	| "doughnut"
+	| "radar"
+	| "funnel"
+	| "treemap"
+	| "histogram";
+
+const CHART_TYPE_LIST: GraphChartType[] = [
+	"bar",
+	"stacked_bar",
+	"horizontal_bar",
+	"line",
+	"area",
+	"composed",
+	"scatter",
+	"bubble",
+	"pie",
+	"doughnut",
+	"radar",
+	"funnel",
+	"treemap",
+	"histogram",
+];
+
+const CHART_TYPES = new Set<GraphChartType>(CHART_TYPE_LIST);
+
+function isPartChart(chartType: GraphChartType): boolean {
+	return chartType === "pie" || chartType === "doughnut" || chartType === "funnel" || chartType === "treemap";
+}
+
+function normalizeChartType(raw: string | undefined): GraphChartType | null {
+	const t = (raw ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+	const aliases: Record<string, GraphChartType> = {
+		stacked: "stacked_bar",
+		stackedbar: "stacked_bar",
+		hbar: "horizontal_bar",
+		barh: "horizontal_bar",
+		donut: "doughnut",
+		combo: "composed",
+		combination: "composed",
+		hist: "histogram",
+	};
+	const mapped = (aliases[t] ?? t) as GraphChartType;
+	return CHART_TYPES.has(mapped) ? mapped : null;
+}
 
 export type GraphExplanation = {
 	summary: string;
@@ -61,8 +115,6 @@ export type GraphPlotResult = {
 	instructionPlan?: GraphInstructionPlan | null;
 	agentSteps?: GraphAgentStep[];
 };
-
-const CHART_TYPES = new Set<GraphChartType>(["bar", "line", "area", "pie", "scatter"]);
 
 function requireUserId(userId?: string | null): string {
 	if (!userId?.trim()) throw new Error("Sign in required.");
@@ -219,14 +271,14 @@ function heuristicPlot(
 	const xKey = categoricalCols[0] || columns[0];
 	const yKeys =
 		numericCols.length > 0
-			? numericCols.slice(0, chartType === "pie" ? 1 : 3)
+			? numericCols.slice(0, isPartChart(chartType) ? 1 : 3)
 			: columns.filter((c) => c !== xKey).slice(0, 1);
 
 	if (yKeys.length === 0) {
 		throw new Error("Could not find a numeric column to plot. Check your dataset.");
 	}
 
-	const limited = rows.slice(0, chartType === "pie" ? 24 : 80);
+	const limited = rows.slice(0, isPartChart(chartType) ? 24 : 80);
 	const series = limited.map((row) => {
 		const point: Record<string, string | number> = { [xKey]: row[xKey] ?? "" };
 		for (const y of yKeys) {
@@ -244,8 +296,8 @@ function heuristicPlot(
 			: `Auto-selected ${xKey} vs ${yKeys.join(", ")}.`,
 		xKey,
 		yKeys,
-		nameKey: chartType === "pie" ? xKey : undefined,
-		valueKey: chartType === "pie" ? yKeys[0] : undefined,
+		nameKey: isPartChart(chartType) ? xKey : undefined,
+		valueKey: isPartChart(chartType) ? yKeys[0] : undefined,
 		series,
 		columns,
 		rowCount: rows.length,
@@ -372,9 +424,9 @@ function seriesStats(plot: GraphPlotResult): {
 	peakLabel: string;
 	lowLabel: string;
 }[] {
-	const labelKey = plot.chartType === "pie" ? plot.nameKey || plot.xKey : plot.xKey;
+	const labelKey = isPartChart(plot.chartType) ? plot.nameKey || plot.xKey : plot.xKey;
 	const valueKeys =
-		plot.chartType === "pie"
+		isPartChart(plot.chartType)
 			? [plot.valueKey || plot.yKeys[0]].filter(Boolean)
 			: plot.yKeys;
 
@@ -416,9 +468,9 @@ function heuristicExplanation(plot: GraphPlotResult, prompt?: string): GraphExpl
 	const stats = seriesStats(plot);
 	const primary = stats[0];
 	const chartLabel = plot.chartType;
-	const xLabel = plot.chartType === "pie" ? plot.nameKey || plot.xKey : plot.xKey;
+	const xLabel = isPartChart(plot.chartType) ? plot.nameKey || plot.xKey : plot.xKey;
 	const yLabel =
-		plot.chartType === "pie" ? plot.valueKey || plot.yKeys[0] : plot.yKeys.join(", ");
+		isPartChart(plot.chartType) ? plot.valueKey || plot.yKeys[0] : plot.yKeys.join(", ");
 
 	const insights: string[] = [];
 	if (primary) {
@@ -428,7 +480,7 @@ function heuristicExplanation(plot: GraphPlotResult, prompt?: string): GraphExpl
 		insights.push(
 			`Highest point is at “${primary.peakLabel}” (${fmtNum(primary.max)}); lowest is at “${primary.lowLabel}” (${fmtNum(primary.min)}).`,
 		);
-		if (plot.chartType === "pie" && primary.total > 0) {
+		if (isPartChart(plot.chartType) && primary.total > 0) {
 			const share = (primary.max / primary.total) * 100;
 			insights.push(`“${primary.peakLabel}” accounts for about ${share.toFixed(1)}% of the total.`);
 		}
@@ -491,7 +543,7 @@ async function agentInterpretInstructions(
 Interpret the researcher's natural-language plotting instructions against available columns.
 Return ONLY JSON with keys:
 - goal: short restatement of what to plot
-- preferredChartType: bar|line|area|pie|scatter or null (only if user clearly wants a different type)
+- preferredChartType: bar|stacked_bar|horizontal_bar|line|area|composed|scatter|bubble|pie|doughnut|radar|funnel|treemap|histogram or null (only if user clearly wants a different type)
 - xKeyHint, yKeyHints (array), categoryHint, valueHint: column names from the provided list only, or null/[]
 - filters: short strings describing row filters if any
 - sortBy: column name or null
@@ -518,11 +570,7 @@ Never invent columns that are not in the list.`,
 		const parsed = extractJsonObject<InstructionPlanJson>(text);
 		if (!parsed?.goal?.trim()) return null;
 
-		const preferred = parsed.preferredChartType?.trim().toLowerCase();
-		const preferredChartType =
-			preferred && CHART_TYPES.has(preferred as GraphChartType)
-				? (preferred as GraphChartType)
-				: null;
+		const preferredChartType = normalizeChartType(parsed.preferredChartType ?? undefined);
 
 		const yKeyHints = Array.isArray(parsed.yKeyHints)
 			? parsed.yKeyHints.map((s) => String(s).trim()).filter(Boolean).slice(0, 3)
@@ -644,7 +692,7 @@ async function agentMapping(
 					content: `You are Agent 2: Column Mapping Agent for a ${chartType} chart.
 Given dataset columns, sample rows, and an optional instruction plan, choose the best fields.
 Return ONLY JSON with keys: title, description, xKey, yKeys (1-3 numeric columns), nameKey, valueKey, sortBy, sortDirection (asc|desc), limit.
-For pie charts, set nameKey (category) and valueKey (numeric). For others, set xKey and yKeys.
+For pie, doughnut, funnel, and treemap, set nameKey (category) and valueKey (numeric). For others, set xKey and yKeys.
 Honor the instruction plan whenever columns exist. Use only provided column names.`,
 				},
 				{
@@ -681,7 +729,7 @@ function applyInstructionPlanToMapping(
 		next.description = `Followed instructions: ${plan.goal.trim()}`;
 	}
 
-	if (chartType === "pie") {
+	if (isPartChart(chartType)) {
 		const cat = resolveColumnHint(plan.categoryHint || plan.xKeyHint, columns);
 		const val = resolveColumnHint(plan.valueHint || plan.yKeyHints?.[0], columns);
 		if (cat) next.nameKey = cat;
@@ -742,7 +790,7 @@ function applySeriesTransforms(
 
 	const limit =
 		typeof mapping?.limit === "number" && Number.isFinite(mapping.limit)
-			? Math.max(1, Math.min(chartType === "pie" ? 24 : 80, Math.round(mapping.limit)))
+			? Math.max(1, Math.min(isPartChart(chartType) ? 24 : 80, Math.round(mapping.limit)))
 			: null;
 	if (limit) next = next.slice(0, limit);
 	return next;
@@ -770,9 +818,9 @@ function applyAgentMapping(
 			: base.valueKey || yKeys[0];
 
 	const keysNeeded =
-		base.chartType === "pie" ? [nameKey!, valueKey!] : [xKey, ...yKeys];
+		isPartChart(base.chartType) ? [nameKey!, valueKey!] : [xKey, ...yKeys];
 
-	let series = rows.slice(0, base.chartType === "pie" ? 24 : 80).map((row) => {
+	let series = rows.slice(0, isPartChart(base.chartType) ? 24 : 80).map((row) => {
 		const point: Record<string, string | number> = {};
 		for (const key of keysNeeded) {
 			const raw = row[key] ?? "";
@@ -789,8 +837,8 @@ function applyAgentMapping(
 		description: mapping.description?.trim() || base.description,
 		xKey,
 		yKeys,
-		nameKey: base.chartType === "pie" ? nameKey : undefined,
-		valueKey: base.chartType === "pie" ? valueKey : undefined,
+		nameKey: isPartChart(base.chartType) ? nameKey : undefined,
+		valueKey: isPartChart(base.chartType) ? valueKey : undefined,
 		series,
 		usedAgent: true,
 	};
@@ -804,9 +852,11 @@ export async function plotDatasetGraph(
 	const uid = requireUserId(userId);
 	if (!Types.ObjectId.isValid(datasetId)) throw new Error("Dataset not found.");
 
-	let chartType = (input.chartType?.trim().toLowerCase() || "bar") as GraphChartType;
+	let chartType = normalizeChartType(input.chartType) ?? "bar";
 	if (!CHART_TYPES.has(chartType)) {
-		throw new Error("Unsupported chart type. Use bar, line, area, pie, or scatter.");
+		throw new Error(
+			"Unsupported chart type. Use bar, stacked bar, horizontal bar, line, area, composed, scatter, bubble, pie, doughnut, radar, funnel, treemap, or histogram.",
+		);
 	}
 
 	const doc = await ResearchDatasetModel.findOne({
@@ -895,7 +945,7 @@ export async function plotDatasetGraph(
 		agent: "Column Mapping Agent",
 		status: rawMapping ? "ok" : mapping ? "fallback" : "fallback",
 		detail: rawMapping
-			? `Mapped ${chartType === "pie" ? `${mapping?.nameKey} → ${mapping?.valueKey}` : `${mapping?.xKey ?? base.xKey} vs ${(mapping?.yKeys ?? base.yKeys).join(", ")}`}.`
+			? `Mapped ${isPartChart(chartType) ? `${mapping?.nameKey} → ${mapping?.valueKey}` : `${mapping?.xKey ?? base.xKey} vs ${(mapping?.yKeys ?? base.yKeys).join(", ")}`}.`
 			: mapping
 				? "LLM mapping failed — applied instruction column hints where possible."
 				: "Used heuristic column detection.",
@@ -955,174 +1005,113 @@ function plotToChartBlock(plot: GraphPlotResult): string {
 	return ["```research-chart", JSON.stringify(payload, null, 2), "```"].join("\n");
 }
 
-type NotebookColumn = { id?: string; name?: string; type?: string };
-type NotebookRow = { cells?: Record<string, string | number | null> };
-type NotebookDataset = {
-	name?: string;
-	sourceFileName?: string;
-	columns?: NotebookColumn[];
-	rows?: NotebookRow[];
-};
-type NotebookAsset = {
-	name?: string;
-	mime?: string;
-	dataUrl?: string;
-};
-
-const MAX_NOTEBOOK_FIGURES = 6;
-const MAX_FIGURE_DATA_URL_CHARS = 350_000; // ~260KB binary
-
-const MAX_NOTEBOOK_TABLE_ROWS = 5;
-
-function notebookDatasetToTable(dataset: NotebookDataset): string {
-	const columns = (dataset.columns ?? []).filter((c) => c.id && c.name);
-	const rows = dataset.rows ?? [];
-	if (!columns.length || !rows.length) return "";
-	const header = `| ${columns.map((c) => escapeMarkdownCell(c.name ?? "")).join(" | ")} |`;
-	const divider = `| ${columns.map(() => "---").join(" | ")} |`;
-	const sample = rows.slice(0, MAX_NOTEBOOK_TABLE_ROWS);
-	const body = sample.map((row) => {
-		const cells = row.cells ?? {};
-		return `| ${columns
-			.map((c) => {
-				const v = cells[c.id!];
-				return escapeMarkdownCell(v == null ? "" : v);
-			})
-			.join(" | ")} |`;
-	});
-	return [header, divider, ...body].join("\n");
-}
-
-function notebookAssetToFigureBlock(asset: NotebookAsset, index: number): string | null {
-	const dataUrl = asset.dataUrl?.trim() ?? "";
-	const mime = (asset.mime ?? "").toLowerCase();
-	if (!dataUrl.startsWith("data:image/")) return null;
-	if (!mime.startsWith("image/") && !/^data:image\//i.test(dataUrl)) return null;
-	if (dataUrl.length > MAX_FIGURE_DATA_URL_CHARS) return null;
-	const title = asset.name?.trim() || `Figure ${index + 1}`;
-	const payload = {
-		type: "research-figure",
-		title,
-		caption: `From research note Figures: ${title}`,
-		mime: mime.startsWith("image/") ? mime : "image/png",
-		dataUrl,
-	};
-	return ["```research-figure", JSON.stringify(payload), "```"].join("\n");
-}
-
-async function buildNotebookVisualizationArtifacts(
-	userId: string,
-	projectIds: string[],
-	topic: string,
-): Promise<{ promptArtifacts: string; figureAppendix: string; hasSavedFigures: boolean }> {
-	const owner = new Types.ObjectId(userId);
-	const ids = projectIds
-		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
-		.slice(0, 3)
-		.map((id) => new Types.ObjectId(id));
-	if (!ids.length) return { promptArtifacts: "", figureAppendix: "", hasSavedFigures: false };
-
-	const projects = await ResearchProjectModel.find({ _id: { $in: ids }, userId: owner });
-	const promptSections: string[] = [];
-	const figureBlocks: string[] = [];
-	const figureNames: string[] = [];
-
-	for (const project of projects) {
-		const notebook = project.notebookData;
-		if (!notebook || typeof notebook !== "object") continue;
-		const state = notebook as {
-			datasets?: NotebookDataset[];
-			assets?: NotebookAsset[];
-		};
-		const datasets = Array.isArray(state.datasets) ? state.datasets : [];
-		const assets = Array.isArray(state.assets) ? state.assets : [];
-		const hasFigures = assets.some((a) => a?.dataUrl?.startsWith("data:image/"));
-
-		// Tables only — do not invent charts when the user already saved figures.
-		for (const dataset of datasets.slice(0, 3)) {
-			const title = dataset.name?.trim() || dataset.sourceFileName || "Dataset";
-			const table = notebookDatasetToTable(dataset);
-			if (!table) continue;
-			const totalRows = dataset.rows?.length ?? 0;
-			promptSections.push(
-				[
-					`### Research note table sample: ${title}`,
-					`From research note “${project.title}” (topic: ${topic}).`,
-					`Show at most ${MAX_NOTEBOOK_TABLE_ROWS} sample rows in Results (dataset has ${totalRows} records). Do not dump the full table.`,
-					"Do NOT create a “Data Source and Variables” section.",
-					"",
-					"**Canonical sample table (≤5 rows — insert exactly as written, only in Results / Analysis)**",
-					"",
-					table,
-				].join("\n"),
-			);
-		}
-
-		let figureIndex = 0;
-		for (const asset of assets) {
-			if (figureIndex >= MAX_NOTEBOOK_FIGURES) break;
-			const block = notebookAssetToFigureBlock(asset, figureIndex);
-			if (!block) continue;
-			const title = asset.name?.trim() || `Figure ${figureIndex + 1}`;
-			figureNames.push(`Figure ${figureIndex + 1}: ${title}`);
-			figureBlocks.push(block);
-			figureIndex += 1;
-		}
-
-		if (hasFigures && figureNames.length) {
-			promptSections.push(
-				[
-					`### Saved research-note figures (use these — do not invent new images)`,
-					`From research note “${project.title}”.`,
-					"In Results / Analysis, refer to these figures by name. The actual images are injected automatically after generation.",
-					"Do NOT create `research-image`, illustrative `research-chart`, or any new image.",
-					"",
-					...figureNames.map((n) => `- ${n}`),
-				].join("\n"),
-			);
-		}
-	}
-
-	return {
-		promptArtifacts: promptSections.join("\n\n").trim(),
-		figureAppendix: figureBlocks.join("\n\n").trim(),
-		hasSavedFigures: figureBlocks.length > 0,
-	};
-}
-
 export type PaperVisualizationResult = {
 	artifacts: string;
 	figureAppendix: string;
 	hasSavedFigures: boolean;
+	figureDocumentIds: string[];
 };
+
+function uniqueValidIds(ids: string[] | undefined, cap = 40): string[] {
+	return (ids ?? []).filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index).slice(0, cap);
+}
+
+async function collectSavedFigureDocuments(
+	userId: string,
+	input: { documentIds?: string[]; projectIds?: string[] },
+): Promise<{ id: string; title: string; fileName: string }[]> {
+	const owner = new Types.ObjectId(userId);
+	const projectOids = uniqueValidIds(input.projectIds, 5).map((id) => new Types.ObjectId(id));
+	const selectedDocIds = uniqueValidIds(input.documentIds, 20).map((id) => new Types.ObjectId(id));
+	if (!projectOids.length && !selectedDocIds.length) return [];
+
+	const clauses: Record<string, unknown>[] = [];
+	if (projectOids.length) {
+		clauses.push({
+			userId: owner,
+			projectId: { $in: projectOids },
+			$or: [
+				{ fileMime: { $regex: /^image\//i } },
+				{ fileName: { $regex: /\.(jpe?g|png|gif|webp|bmp)$/i } },
+			],
+		});
+	}
+	if (selectedDocIds.length) {
+		clauses.push({ userId: owner, _id: { $in: selectedDocIds } });
+	}
+
+	const rows = await ResearchDocumentModel.find(clauses.length === 1 ? clauses[0] : { $or: clauses })
+		.select("_id title fileName fileMime")
+		.sort({ updatedAt: -1 })
+		.limit(40)
+		.lean();
+
+	const images = rows.filter((row) => isImageFile(row.fileName ?? "", row.fileMime ?? ""));
+	const byId = new Map(images.map((row) => [row._id.toString(), row]));
+	const ordered: typeof images = [];
+	for (const id of uniqueValidIds(input.documentIds, 20)) {
+		const row = byId.get(id);
+		if (row) ordered.push(row);
+	}
+	for (const row of images) {
+		if (!ordered.some((item) => item._id.toString() === row._id.toString())) ordered.push(row);
+	}
+
+	return ordered.slice(0, MAX_PAPER_FIGURES).map((row) => ({
+		id: row._id.toString(),
+		title: (row.title ?? "").trim() || row.fileName,
+		fileName: row.fileName,
+	}));
+}
+
+function savedFiguresCatalog(figures: { title: string; fileName: string }[]): string {
+	if (!figures.length) return "";
+	const lines = figures.map((figure, index) => {
+		const n = index + 1;
+		const name = figure.fileName && figure.fileName !== figure.title ? ` (file “${figure.fileName}”)` : "";
+		return `${n}. **Figure ${n}: ${figure.title}**${name}`;
+	});
+	return [
+		"### Saved notebook figures (pixels attached after generation)",
+		"Discuss these by number in Results/Findings. Do not invent image URLs, `research-figure` blocks, or extra illustrative images.",
+		"",
+		...lines,
+	].join("\n");
+}
 
 export async function buildPaperVisualizationArtifacts(
 	userId: string | null | undefined,
-	input: { datasetIds?: string[]; projectIds?: string[]; topic?: string },
+	input: { datasetIds?: string[]; projectIds?: string[]; documentIds?: string[]; topic?: string },
 ): Promise<PaperVisualizationResult> {
 	const uid = requireUserId(userId);
-	const datasetIds = (input.datasetIds ?? [])
-		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
-		.slice(0, 3);
-	const projectIds = (input.projectIds ?? [])
-		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
-		.slice(0, 3);
-	if (!datasetIds.length && !projectIds.length) {
-		return { artifacts: "", figureAppendix: "", hasSavedFigures: false };
+	const selected = uniqueValidIds(input.datasetIds, 20);
+	const projectOids = uniqueValidIds(input.projectIds, 5).map((id) => new Types.ObjectId(id));
+	const figures = await collectSavedFigureDocuments(uid, input);
+
+	let datasetIds = [...selected];
+	if (projectOids.length) {
+		const folderDatasets = await ResearchDatasetModel.find({
+			userId: new Types.ObjectId(uid),
+			projectId: { $in: projectOids },
+		})
+			.select("_id")
+			.sort({ updatedAt: -1 })
+			.limit(8);
+		for (const row of folderDatasets) {
+			const id = row._id.toString();
+			if (!datasetIds.includes(id)) datasetIds.push(id);
+		}
+	}
+
+	datasetIds = datasetIds.slice(0, 5);
+	if (!datasetIds.length && !figures.length) {
+		return { artifacts: "", figureAppendix: "", hasSavedFigures: false, figureDocumentIds: [] };
 	}
 
 	const topic = input.topic?.trim() || "research findings";
 	const sections: string[] = [];
-
-	// Prefer research-note path: skip slow LLM chart agents when a note is selected.
-	if (projectIds.length) {
-		const notebook = await buildNotebookVisualizationArtifacts(uid, projectIds, topic);
-		return {
-			artifacts: notebook.promptArtifacts,
-			figureAppendix: notebook.figureAppendix,
-			hasSavedFigures: notebook.hasSavedFigures,
-		};
-	}
+	const catalog = savedFiguresCatalog(figures);
+	if (catalog) sections.push(catalog);
 
 	for (const datasetId of datasetIds) {
 		try {
@@ -1165,9 +1154,12 @@ export async function buildPaperVisualizationArtifacts(
 		}
 	}
 
+	const artifacts = sections.join("\n\n").trim();
+	const figureDocumentIds = figures.map((figure) => figure.id);
 	return {
-		artifacts: sections.join("\n\n").trim(),
-		figureAppendix: "",
-		hasSavedFigures: false,
+		artifacts,
+		figureAppendix: catalog,
+		hasSavedFigures: figureDocumentIds.length > 0,
+		figureDocumentIds,
 	};
 }

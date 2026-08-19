@@ -63,7 +63,7 @@ export function getOpenRouterOutlineModel(): string {
 export function getOpenRouterApiKey(): string {
 	const key = process.env.OPENROUTER_API_KEY?.trim();
 	if (!key) {
-		throw new Error("OPENROUTER_API_KEY is not set. Add it to .env at the repo root.");
+		throw new Error("OPENROUTER_API_KEY is not set. Add it to backend/.env.");
 	}
 	return key;
 }
@@ -105,6 +105,25 @@ export function isTavilyEnabled(): boolean {
 	return process.env.TAVILY_ENABLED !== "false";
 }
 
+export function getHuggingFaceToken(): string | null {
+	return process.env.HF_TOKEN?.trim() || process.env.HUGGINGFACE_API_KEY?.trim() || null;
+}
+
+export function isHuggingFaceEnabled(): boolean {
+	return process.env.HUGGINGFACE_ENABLED !== "false" && Boolean(getHuggingFaceToken());
+}
+
+export function getHuggingFaceEmbedModel(): string {
+	return process.env.HUGGINGFACE_EMBED_MODEL?.trim() || "sentence-transformers/all-MiniLM-L6-v2";
+}
+
+export function getHuggingFaceNliModel(): string {
+	return (
+		process.env.HUGGINGFACE_NLI_MODEL?.trim() ||
+		"MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+	);
+}
+
 export function getOpenAlexApiKey(): string | null {
 	return process.env.OPENALEX_API_KEY?.trim() || null;
 }
@@ -130,6 +149,25 @@ export function getPubmedApiBase(): string {
 
 export function isPubmedEnabled(): boolean {
 	return process.env.PUBMED_ENABLED !== "false";
+}
+
+export function getDoajApiBase(): string {
+	return process.env.DOAJ_API_BASE?.trim() || "https://doaj.org/api";
+}
+
+export function isDoajEnabled(): boolean {
+	return process.env.DOAJ_ENABLED !== "false";
+}
+
+export function getEuropePmcApiBase(): string {
+	return (
+		process.env.EUROPE_PMC_API_BASE?.trim() ||
+		"https://www.ebi.ac.uk/europepmc/webservices/rest"
+	);
+}
+
+export function isEuropePmcEnabled(): boolean {
+	return process.env.EUROPE_PMC_ENABLED !== "false";
 }
 
 /** Local paper library RAG — check Mongo before AlphaXiv/arXiv/Tavily. */

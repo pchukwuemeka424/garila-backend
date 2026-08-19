@@ -41,7 +41,7 @@ const researchProjectSchema = new Schema(
 		favorite: { type: Boolean, default: false },
 		progress: { type: Number, default: 0, min: 0, max: 100 },
 		startedAt: { type: Date, default: Date.now },
-		/** CanvAtlas notebook snapshot (sections, pages, datasets, drafts, …). */
+		/** Legacy notebook snapshot field (no longer written by app code). */
 		notebookData: { type: Schema.Types.Mixed, default: null },
 	},
 	{ timestamps: true },

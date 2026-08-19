@@ -2,9 +2,24 @@ import { Types } from "mongoose";
 
 import { ResearchDatasetModel } from "../db/models/ResearchDataset.js";
 import { ResearchDocumentModel } from "../db/models/ResearchDocument.js";
-import { ResearchNoteModel } from "../db/models/ResearchNote.js";
 import { ResearchProjectModel } from "../db/models/ResearchProject.js";
+import { ResearchQuestionnaireModel } from "../db/models/ResearchQuestionnaire.js";
 import { ResearchReferenceModel } from "../db/models/ResearchReference.js";
+import {
+	computeNotebookProgress,
+	sanitizeNotebookData,
+	type ResearchNotebookData,
+} from "../lib/research-notebook.js";
+import {
+	clipMeta,
+	clipTitle,
+	decodeDataUrlToBuffer,
+	itemsFromColumns,
+	parseTabularBuffer,
+	sampleByColumn,
+	sanitizeQuestionnaireItems,
+	type QuestionnaireItem,
+} from "../lib/research-questionnaire.js";
 import {
 	buildEmptySections,
 	isResearchProjectType,
@@ -127,9 +142,10 @@ export type ResearchProjectDto = {
 	counts: {
 		documents: number;
 		datasets: number;
-		notes: number;
 		references: number;
+		questionnaires: number;
 	};
+	notebookData: ResearchNotebookData;
 };
 
 export type ResearchDocumentDto = {
@@ -140,14 +156,6 @@ export type ResearchDocumentDto = {
 	sizeLabel: string;
 	kind: "doc" | "pdf" | "sheet" | "other";
 	hasFile: boolean;
-	createdAt: string;
-	updatedAt: string;
-};
-
-export type ResearchNoteDto = {
-	id: string;
-	title: string;
-	content: string;
 	createdAt: string;
 	updatedAt: string;
 };
@@ -163,9 +171,26 @@ export type ResearchReferenceDto = {
 
 export type ResearchActivityDto = {
 	id: string;
-	kind: "dataset" | "document" | "note" | "reference" | "project";
+	kind: "dataset" | "document" | "reference" | "project" | "questionnaire";
 	label: string;
 	at: string;
+};
+
+export type ResearchQuestionnaireDto = {
+	id: string;
+	title: string;
+	description: string;
+	population: string;
+	sampleSize: number;
+	distributionNote: string;
+	items: QuestionnaireItem[];
+	responseDatasetId: string | null;
+	instrumentDocumentId: string | null;
+	rowCount: number;
+	importedFileName: string;
+	columns: string[];
+	createdAt: string;
+	updatedAt: string;
 };
 
 function formatBytes(n: number): string {
@@ -175,8 +200,11 @@ function formatBytes(n: number): string {
 	return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
 function inferDocKind(fileName: string, mime: string): "doc" | "pdf" | "sheet" | "other" {
 	const lower = `${fileName} ${mime}`.toLowerCase();
+	if (lower.includes("image/") || /\.(jpe?g|png|gif|webp|heic)$/i.test(fileName)) return "other";
 	if (lower.includes("pdf")) return "pdf";
 	if (lower.includes("sheet") || lower.includes("excel") || /\.(xlsx?|csv|tsv)$/.test(fileName.toLowerCase()))
 		return "sheet";
@@ -197,6 +225,7 @@ function toProjectDto(
 		startedAt?: Date | null;
 		createdAt: Date;
 		updatedAt: Date;
+		notebookData?: unknown;
 	},
 	counts: ResearchProjectDto["counts"],
 ): ResearchProjectDto {
@@ -220,6 +249,7 @@ function toProjectDto(
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
 		counts,
+		notebookData: sanitizeNotebookData(doc.notebookData),
 	};
 }
 
@@ -243,22 +273,6 @@ function toDocumentDto(doc: {
 		sizeLabel: doc.sizeLabel ?? "",
 		kind: doc.kind ?? "other",
 		hasFile: hasStoredAttachment(doc),
-		createdAt: doc.createdAt.toISOString(),
-		updatedAt: doc.updatedAt.toISOString(),
-	};
-}
-
-function toNoteDto(doc: {
-	_id: Types.ObjectId;
-	title: string;
-	content?: string | null;
-	createdAt: Date;
-	updatedAt: Date;
-}): ResearchNoteDto {
-	return {
-		id: doc._id.toString(),
-		title: doc.title,
-		content: doc.content ?? "",
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
 	};
@@ -301,35 +315,59 @@ async function countAssets(
 		userId: new Types.ObjectId(userId),
 		projectId: new Types.ObjectId(projectId),
 	};
-	const [documents, datasets, notes, references] = await Promise.all([
+	const [documents, datasets, references, questionnaires] = await Promise.all([
 		ResearchDocumentModel.countDocuments(filter),
 		ResearchDatasetModel.countDocuments(filter),
-		ResearchNoteModel.countDocuments(filter),
 		ResearchReferenceModel.countDocuments(filter),
+		ResearchQuestionnaireModel.countDocuments(filter),
 	]);
-	return { documents, datasets, notes, references };
+	return { documents, datasets, references, questionnaires };
 }
 
-function computeProgress(
-	project: { description?: string | null; status?: string | null },
-	counts: ResearchProjectDto["counts"],
-): number {
-	let score = 0;
-	if (project.description?.trim()) score += 20;
-	if (counts.documents > 0) score += 25;
-	if (counts.datasets > 0) score += 15;
-	if (counts.notes > 0) score += 10;
-	if (counts.references > 0) score += 10;
-	if (project.status === "completed") score = Math.max(score, 100);
-	else if (project.status === "in_progress" && score < 25) score = 25;
-	return Math.min(100, score);
+async function countPictures(userId: string, projectId: string): Promise<number> {
+	return ResearchDocumentModel.countDocuments({
+		userId: new Types.ObjectId(userId),
+		projectId: new Types.ObjectId(projectId),
+		fileMime: { $regex: /^image\//i },
+	});
+}
+
+async function persistNotebookProgress(
+	userId: string,
+	projectId: string,
+	notebookData: unknown,
+): Promise<number> {
+	const filter = {
+		userId: new Types.ObjectId(userId),
+		projectId: new Types.ObjectId(projectId),
+	};
+	const [counts, pictures, questionnaires] = await Promise.all([
+		countAssets(userId, projectId),
+		countPictures(userId, projectId),
+		ResearchQuestionnaireModel.find(filter)
+			.select("description population distributionNote items.prompt")
+			.lean(),
+	]);
+	const surveyTexts = questionnaires.map((q) => {
+		const prompts = Array.isArray(q.items) ? q.items.map((item) => String(item?.prompt ?? "")).join(" ") : "";
+		return `${q.description ?? ""} ${q.population ?? ""} ${q.distributionNote ?? ""} ${prompts}`;
+	});
+	return computeNotebookProgress(notebookData, {
+		datasets: counts.datasets,
+		questionnaires: counts.questionnaires,
+		pictures,
+		files: Math.max(0, counts.documents - pictures),
+		surveyTexts,
+	});
 }
 
 async function touchProject(userId: string, projectId: string): Promise<void> {
 	const doc = await requireOwnedProject(userId, projectId);
-	const counts = await countAssets(userId, projectId);
-	doc.progress = computeProgress(doc, counts);
-	await doc.save();
+	const progress = await persistNotebookProgress(userId, projectId, doc.notebookData);
+	await ResearchProjectModel.updateOne(
+		{ _id: doc._id, userId: new Types.ObjectId(userId) },
+		{ $set: { progress } },
+	);
 }
 
 async function backfillOrphanAssets(userId: string, projectId: Types.ObjectId): Promise<void> {
@@ -342,8 +380,8 @@ async function backfillOrphanAssets(userId: string, projectId: Types.ObjectId): 
 	await Promise.all([
 		ResearchDatasetModel.updateMany(orphanFilter, update),
 		ResearchDocumentModel.updateMany(orphanFilter, update),
-		ResearchNoteModel.updateMany(orphanFilter, update),
 		ResearchReferenceModel.updateMany(orphanFilter, update),
+		ResearchQuestionnaireModel.updateMany(orphanFilter, update),
 	]);
 }
 
@@ -374,7 +412,8 @@ export async function listProjects(userId?: string | null): Promise<ResearchProj
 	return Promise.all(
 		rows.map(async (doc) => {
 			const counts = await countAssets(uid, doc._id.toString());
-			return toProjectDto(doc, counts);
+			const progress = await persistNotebookProgress(uid, doc._id.toString(), doc.notebookData);
+			return { ...toProjectDto(doc, counts), progress };
 		}),
 	);
 }
@@ -429,7 +468,7 @@ export async function getProject(
 		doc.markModified("sections");
 	}
 	const counts = await countAssets(uid, doc._id.toString());
-	const progress = computeProgress(doc, counts);
+	const progress = await persistNotebookProgress(uid, doc._id.toString(), doc.notebookData);
 	if (doc.progress !== progress) {
 		doc.progress = progress;
 	}
@@ -456,7 +495,7 @@ export async function getOrCreateProject(userId?: string | null): Promise<Resear
 	}
 	await backfillOrphanAssets(uid, doc._id);
 	const counts = await countAssets(uid, doc._id.toString());
-	const progress = computeProgress(doc, counts);
+	const progress = await persistNotebookProgress(uid, doc._id.toString(), doc.notebookData);
 	if (doc.progress !== progress) {
 		doc.progress = progress;
 		await doc.save();
@@ -474,6 +513,8 @@ export async function updateProject(
 		favorite?: boolean;
 		projectType?: string;
 		sections?: Array<{ id: string; title?: string; content?: string }>;
+		notebookData?: unknown;
+		progress?: number;
 	},
 ): Promise<ResearchProjectDto> {
 	const uid = requireUserId(userId);
@@ -516,8 +557,13 @@ export async function updateProject(
 		doc.set("sections", buildEmptySections(projectType));
 	}
 
+	if (input.notebookData !== undefined) {
+		doc.set("notebookData", sanitizeNotebookData(input.notebookData));
+		doc.markModified("notebookData");
+	}
+
 	const counts = await countAssets(uid, doc._id.toString());
-	doc.progress = computeProgress(doc, counts);
+	doc.progress = await persistNotebookProgress(uid, doc._id.toString(), doc.notebookData);
 	await doc.save();
 	return toProjectDto(doc, counts);
 }
@@ -532,42 +578,11 @@ export async function deleteProject(
 	await Promise.all([
 		ResearchDatasetModel.deleteMany(filter),
 		ResearchDocumentModel.deleteMany(filter),
-		ResearchNoteModel.deleteMany(filter),
 		ResearchReferenceModel.deleteMany(filter),
+		ResearchQuestionnaireModel.deleteMany(filter),
 	]);
 	const result = await ResearchProjectModel.deleteOne({ _id: doc._id, userId: new Types.ObjectId(uid) });
 	return result.deletedCount > 0;
-}
-
-const MAX_NOTEBOOK_JSON_CHARS = 4_000_000;
-
-export async function getNotebookData(
-	userId: string | null | undefined,
-	projectId: string,
-): Promise<{ notebookData: unknown | null; updatedAt: string }> {
-	const uid = requireUserId(userId);
-	const doc = await requireOwnedProject(uid, projectId);
-	return {
-		notebookData: doc.notebookData ?? null,
-		updatedAt: doc.updatedAt.toISOString(),
-	};
-}
-
-export async function saveNotebookData(
-	userId: string | null | undefined,
-	projectId: string,
-	notebookData: unknown,
-): Promise<{ ok: true; updatedAt: string }> {
-	const uid = requireUserId(userId);
-	const doc = await requireOwnedProject(uid, projectId);
-	const encoded = JSON.stringify(notebookData ?? null);
-	if (encoded.length > MAX_NOTEBOOK_JSON_CHARS) {
-		throw new Error("Notebook is too large to sync. Remove large datasets or split the project.");
-	}
-	doc.notebookData = notebookData ?? null;
-	doc.markModified("notebookData");
-	await doc.save();
-	return { ok: true, updatedAt: doc.updatedAt.toISOString() };
 }
 
 export async function listDatasets(
@@ -855,6 +870,17 @@ export async function createDocument(
 	if (!fileName) throw new Error("A file is required.");
 	if (!input.fileData?.trim()) throw new Error("A file is required.");
 
+	const mime = (input.fileMime ?? "").toLowerCase();
+	if (mime.startsWith("image/")) {
+		const comma = input.fileData.indexOf(",");
+		const b64 = comma >= 0 ? input.fileData.slice(comma + 1) : input.fileData;
+		const bytes = Math.floor((b64.length * 3) / 4);
+		if (bytes > IMAGE_MAX_BYTES) throw new Error("Images must be 8 MB or smaller.");
+		if (!/^image\/(jpeg|jpg|png|gif|webp)$/i.test(mime)) {
+			throw new Error("Use JPEG, PNG, GIF, or WebP images.");
+		}
+	}
+
 	const projectObjectId = await resolveProjectObjectId(uid, input.projectId);
 	const documentId = new Types.ObjectId();
 	const stored = await storeAttachment({
@@ -917,68 +943,6 @@ export async function deleteDocument(id: string, userId?: string | null): Promis
 	return true;
 }
 
-export async function listNotes(
-	userId?: string | null,
-	projectId?: string | null,
-	limit = 100,
-): Promise<ResearchNoteDto[]> {
-	const uid = requireUserId(userId);
-	const rows = await ResearchNoteModel.find(userFilter(uid, projectId))
-		.sort({ updatedAt: -1 })
-		.limit(limit);
-	return rows.map(toNoteDto);
-}
-
-export async function createNote(
-	userId: string | null | undefined,
-	input: { projectId?: string; title?: string; content?: string },
-): Promise<ResearchNoteDto> {
-	const uid = requireUserId(userId);
-	const content = input.content?.trim() ?? "";
-	if (!content) throw new Error("Findings content is required.");
-	const title = input.title?.trim() || "Untitled finding";
-	const projectObjectId = await resolveProjectObjectId(uid, input.projectId);
-	const created = await ResearchNoteModel.create({
-		userId: new Types.ObjectId(uid),
-		projectId: projectObjectId,
-		title,
-		content,
-	});
-	await touchProject(uid, projectObjectId.toString());
-	return toNoteDto(created);
-}
-
-export async function updateNote(
-	id: string,
-	userId: string | null | undefined,
-	input: { title?: string; content?: string },
-): Promise<ResearchNoteDto | null> {
-	const uid = requireUserId(userId);
-	if (!Types.ObjectId.isValid(id)) return null;
-	const doc = await ResearchNoteModel.findOne({ _id: id, userId: new Types.ObjectId(uid) });
-	if (!doc) return null;
-	if (typeof input.title === "string" && input.title.trim()) doc.title = input.title.trim();
-	if (typeof input.content === "string") doc.content = input.content.trim();
-	await doc.save();
-	const pid = projectIdString(doc.projectId);
-	if (pid) await touchProject(uid, pid);
-	return toNoteDto(doc);
-}
-
-export async function deleteNote(id: string, userId?: string | null): Promise<boolean> {
-	const uid = requireUserId(userId);
-	if (!Types.ObjectId.isValid(id)) return false;
-	const doc = await ResearchNoteModel.findOne({
-		_id: id,
-		userId: new Types.ObjectId(uid),
-	});
-	if (!doc) return false;
-	await doc.deleteOne();
-	const pid = projectIdString(doc.projectId);
-	if (pid) await touchProject(uid, pid);
-	return true;
-}
-
 export async function listReferences(
 	userId?: string | null,
 	projectId?: string | null,
@@ -1011,6 +975,228 @@ export async function createReference(
 	return toReferenceDto(created);
 }
 
+function oidString(value: Types.ObjectId | string | null | undefined): string | null {
+	if (!value) return null;
+	return typeof value === "string" ? value : value.toString();
+}
+
+function toQuestionnaireDto(doc: {
+	_id: Types.ObjectId;
+	title: string;
+	description?: string | null;
+	population?: string | null;
+	sampleSize?: number | null;
+	distributionNote?: string | null;
+	items?: unknown;
+	responseDatasetId?: Types.ObjectId | string | null;
+	instrumentDocumentId?: Types.ObjectId | string | null;
+	rowCount?: number | null;
+	importedFileName?: string | null;
+	columns?: string[] | null;
+	createdAt: Date;
+	updatedAt: Date;
+}): ResearchQuestionnaireDto {
+	return {
+		id: doc._id.toString(),
+		title: doc.title,
+		description: doc.description ?? "",
+		population: doc.population ?? "",
+		sampleSize: Number(doc.sampleSize) || 0,
+		distributionNote: doc.distributionNote ?? "",
+		items: sanitizeQuestionnaireItems(doc.items),
+		responseDatasetId: oidString(doc.responseDatasetId),
+		instrumentDocumentId: oidString(doc.instrumentDocumentId),
+		rowCount: Number(doc.rowCount) || 0,
+		importedFileName: doc.importedFileName ?? "",
+		columns: Array.isArray(doc.columns) ? doc.columns.map((c) => String(c)) : [],
+		createdAt: doc.createdAt.toISOString(),
+		updatedAt: doc.updatedAt.toISOString(),
+	};
+}
+
+export async function listQuestionnaires(
+	userId?: string | null,
+	projectId?: string | null,
+	limit = 100,
+): Promise<ResearchQuestionnaireDto[]> {
+	const uid = requireUserId(userId);
+	const rows = await ResearchQuestionnaireModel.find(userFilter(uid, projectId))
+		.sort({ updatedAt: -1 })
+		.limit(limit);
+	return rows.map(toQuestionnaireDto);
+}
+
+export async function createQuestionnaire(
+	userId: string | null | undefined,
+	input: {
+		projectId?: string;
+		title?: string;
+		description?: string;
+		population?: string;
+		sampleSize?: number;
+		distributionNote?: string;
+		items?: unknown;
+		instrumentDocumentId?: string;
+	},
+): Promise<ResearchQuestionnaireDto> {
+	const uid = requireUserId(userId);
+	const title = clipTitle(input.title) || "Untitled questionnaire";
+	const projectObjectId = await resolveProjectObjectId(uid, input.projectId);
+	const instrumentId = parseObjectId(input.instrumentDocumentId);
+	const created = await ResearchQuestionnaireModel.create({
+		userId: new Types.ObjectId(uid),
+		projectId: projectObjectId,
+		title,
+		description: clipMeta(input.description, 4000),
+		population: clipMeta(input.population, 400),
+		sampleSize: Number.isFinite(Number(input.sampleSize)) ? Math.max(0, Math.round(Number(input.sampleSize))) : 0,
+		distributionNote: clipMeta(input.distributionNote, 400),
+		items: sanitizeQuestionnaireItems(input.items),
+		instrumentDocumentId: instrumentId,
+		responseDatasetId: null,
+		rowCount: 0,
+		importedFileName: "",
+		columns: [],
+	});
+	await touchProject(uid, projectObjectId.toString());
+	return toQuestionnaireDto(created);
+}
+
+export async function updateQuestionnaire(
+	id: string,
+	userId: string | null | undefined,
+	input: {
+		title?: string;
+		description?: string;
+		population?: string;
+		sampleSize?: number;
+		distributionNote?: string;
+		items?: unknown;
+		instrumentDocumentId?: string | null;
+	},
+): Promise<ResearchQuestionnaireDto | null> {
+	const uid = requireUserId(userId);
+	if (!Types.ObjectId.isValid(id)) return null;
+	const doc = await ResearchQuestionnaireModel.findOne({
+		_id: id,
+		userId: new Types.ObjectId(uid),
+	});
+	if (!doc) return null;
+	if (typeof input.title === "string" && input.title.trim()) doc.title = clipTitle(input.title);
+	if (typeof input.description === "string") doc.description = clipMeta(input.description, 4000);
+	if (typeof input.population === "string") doc.population = clipMeta(input.population, 400);
+	if (input.sampleSize !== undefined) {
+		const n = Number(input.sampleSize);
+		if (Number.isFinite(n)) doc.sampleSize = Math.max(0, Math.round(n));
+	}
+	if (typeof input.distributionNote === "string") {
+		doc.distributionNote = clipMeta(input.distributionNote, 400);
+	}
+	if (input.items !== undefined) {
+		doc.set("items", sanitizeQuestionnaireItems(input.items));
+		doc.markModified("items");
+	}
+	if (input.instrumentDocumentId === null) {
+		doc.instrumentDocumentId = null;
+	} else if (typeof input.instrumentDocumentId === "string") {
+		doc.instrumentDocumentId = parseObjectId(input.instrumentDocumentId);
+	}
+	await doc.save();
+	const pid = projectIdString(doc.projectId);
+	if (pid) await touchProject(uid, pid);
+	return toQuestionnaireDto(doc);
+}
+
+export async function importQuestionnaireResponses(
+	id: string,
+	userId: string | null | undefined,
+	input: {
+		fileName?: string;
+		fileMime?: string;
+		fileData?: string;
+		columnMap?: Record<string, string>;
+	},
+): Promise<ResearchQuestionnaireDto> {
+	const uid = requireUserId(userId);
+	if (!Types.ObjectId.isValid(id)) throw new Error("Questionnaire not found.");
+	const doc = await ResearchQuestionnaireModel.findOne({
+		_id: id,
+		userId: new Types.ObjectId(uid),
+	});
+	if (!doc) throw new Error("Questionnaire not found.");
+	const fileData = input.fileData?.trim() ?? "";
+	const fileName = input.fileName?.trim() || "responses.csv";
+	if (!fileData) throw new Error("Upload a CSV or Excel file of collated responses.");
+
+	const buffer = decodeDataUrlToBuffer(fileData);
+	const parsed = await parseTabularBuffer(fileName, buffer);
+	const samples = sampleByColumn(parsed.columns, parsed.rows);
+	const existing = sanitizeQuestionnaireItems(doc.items);
+	const map = input.columnMap && typeof input.columnMap === "object" ? input.columnMap : {};
+
+	let items = existing;
+	if (items.length === 0) {
+		items = itemsFromColumns(parsed.columns, samples);
+	} else {
+		const byPrompt = new Map(items.map((item) => [item.prompt.trim().toLowerCase(), item]));
+		for (const column of parsed.columns) {
+			const mappedId = map[column];
+			const existingItem = mappedId
+				? items.find((item) => item.id === mappedId)
+				: byPrompt.get(column.trim().toLowerCase());
+			if (existingItem) {
+				existingItem.column = column;
+			} else {
+				const [created] = itemsFromColumns([column], { [column]: samples[column] ?? [] });
+				if (created) items.push(created);
+			}
+		}
+	}
+
+	const pid = projectIdString(doc.projectId) ?? "";
+	const dataset = await createDataset(uid, {
+		projectId: pid,
+		title: `${doc.title} responses`,
+		description: `Collated questionnaire responses (${parsed.rows.length} rows) from ${fileName}`,
+		discipline: "",
+		format: "survey_responses",
+		year: "",
+		license: "",
+		accessUrl: "",
+		sizeLabel: "",
+		tags: ["questionnaire", "survey"],
+		visibility: "private",
+		fileName,
+		fileMime: input.fileMime,
+		fileData,
+	});
+
+	doc.set("items", items);
+	doc.markModified("items");
+	doc.responseDatasetId = new Types.ObjectId(dataset.id);
+	doc.rowCount = parsed.rows.length;
+	doc.importedFileName = fileName;
+	doc.columns = parsed.columns;
+	if (!doc.sampleSize) doc.sampleSize = parsed.rows.length;
+	await doc.save();
+	if (pid) await touchProject(uid, pid);
+	return toQuestionnaireDto(doc);
+}
+
+export async function deleteQuestionnaire(id: string, userId?: string | null): Promise<boolean> {
+	const uid = requireUserId(userId);
+	if (!Types.ObjectId.isValid(id)) return false;
+	const doc = await ResearchQuestionnaireModel.findOne({
+		_id: id,
+		userId: new Types.ObjectId(uid),
+	});
+	if (!doc) return false;
+	await doc.deleteOne();
+	const pid = projectIdString(doc.projectId);
+	if (pid) await touchProject(uid, pid);
+	return true;
+}
+
 export async function deleteReference(id: string, userId?: string | null): Promise<boolean> {
 	const uid = requireUserId(userId);
 	if (!Types.ObjectId.isValid(id)) return false;
@@ -1036,14 +1222,17 @@ export async function listActivity(
 		? { _id: new Types.ObjectId(projectId), userId: new Types.ObjectId(uid) }
 		: { userId: new Types.ObjectId(uid) };
 
-	const [datasets, documents, notes, references, projects] = await Promise.all([
+	const [datasets, documents, references, questionnaires, projects] = await Promise.all([
 		ResearchDatasetModel.find(filter).sort({ updatedAt: -1 }).limit(limit).select("title updatedAt"),
 		ResearchDocumentModel.find(filter)
 			.sort({ updatedAt: -1 })
 			.limit(limit)
 			.select("title fileName updatedAt"),
-		ResearchNoteModel.find(filter).sort({ updatedAt: -1 }).limit(limit).select("title updatedAt"),
 		ResearchReferenceModel.find(filter).sort({ updatedAt: -1 }).limit(limit).select("title updatedAt"),
+		ResearchQuestionnaireModel.find(filter)
+			.sort({ updatedAt: -1 })
+			.limit(limit)
+			.select("title updatedAt"),
 		ResearchProjectModel.find(projectQuery)
 			.sort({ updatedAt: -1 })
 			.limit(projectId ? 1 : limit)
@@ -1063,17 +1252,17 @@ export async function listActivity(
 			label: `“${d.title || d.fileName}” updated`,
 			at: d.updatedAt.toISOString(),
 		})),
-		...notes.map((n) => ({
-			id: `note-${n._id.toString()}`,
-			kind: "note" as const,
-			label: `Note “${n.title}” updated`,
-			at: n.updatedAt.toISOString(),
-		})),
 		...references.map((r) => ({
 			id: `reference-${r._id.toString()}`,
 			kind: "reference" as const,
 			label: `Reference “${r.title}” added`,
 			at: r.updatedAt.toISOString(),
+		})),
+		...questionnaires.map((q) => ({
+			id: `questionnaire-${q._id.toString()}`,
+			kind: "questionnaire" as const,
+			label: `Questionnaire “${q.title}” updated`,
+			at: q.updatedAt.toISOString(),
 		})),
 		...projects.map((project) => ({
 			id: `project-${project._id.toString()}`,
@@ -1089,12 +1278,12 @@ export async function listActivity(
 export async function getWorkspaceBundle(userId: string | null | undefined, projectId: string) {
 	const uid = requireUserId(userId);
 	const project = await getProject(uid, projectId);
-	const [datasets, documents, notes, references, activity] = await Promise.all([
+	const [datasets, documents, references, questionnaires, activity] = await Promise.all([
 		listDatasets(uid, projectId),
 		listDocuments(uid, projectId),
-		listNotes(uid, projectId),
 		listReferences(uid, projectId),
+		listQuestionnaires(uid, projectId),
 		listActivity(uid, projectId),
 	]);
-	return { project, datasets, documents, notes, references, activity };
+	return { project, datasets, documents, references, questionnaires, activity };
 }

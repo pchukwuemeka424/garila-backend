@@ -24,6 +24,7 @@ const savedResearchSchema = new Schema(
 		sources: {
 			documentIds: { type: [String], default: [] },
 			datasetIds: { type: [String], default: [] },
+			questionnaireIds: { type: [String], default: [] },
 			noteIds: { type: [String], default: [] },
 			projectIds: { type: [String], default: [] },
 		},

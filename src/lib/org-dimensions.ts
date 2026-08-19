@@ -104,10 +104,15 @@ export function resolveFaculty(department: string): string {
 }
 
 export function resolveProgramme(role: string, department: string, scope?: string | null): string {
-	if (scope === "undergraduate") return `${department} — Undergraduate`;
-	if (scope === "masters") return `${department} — Masters`;
-	if (scope === "doctoral") return `${department} — Doctoral`;
+	if (scope === "undergraduate" || scope === "undergraduate_project") return `${department} — Undergraduate project`;
+	if (scope === "masters" || scope === "thesis") return `${department} — Thesis`;
+	if (scope === "doctoral" || scope === "phd" || scope === "dissertation") return `${department} — Dissertation`;
 	if (scope === "faculty") return `${department} — Faculty research`;
+	if (scope === "journal") return `${department} — Journal/Research Paper`;
+	if (scope === "conference") return `${department} — Conference paper`;
+	if (scope === "proposal") return `${department} — Research proposal`;
+	if (scope === "report") return `${department} — Project report`;
+	if (scope === "assignment") return `${department} — Assignment`;
 	if (role === "student") return `${department} — Student`;
 	if (role === "lecturer" || role === "researcher") return `${department} — Staff`;
 	return department;

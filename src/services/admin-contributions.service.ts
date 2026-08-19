@@ -5,6 +5,10 @@ import { UserModel } from "../db/models/User.js";
 import type { AdminScope } from "../lib/require-admin.js";
 import { universityFilterForScope } from "../lib/require-admin.js";
 import { recordAuditEvent } from "./admin-audit.service.js";
+import {
+	encryptResearchTitleForAdmin,
+	redactTitleInText,
+} from "../lib/research-title-privacy.js";
 
 export type ContributionOutputType =
 	| "paper"
@@ -40,6 +44,7 @@ export type AiContributionStatementRecord = {
 	generatedAt: string;
 	createdAt: string;
 	updatedAt: string;
+	titleEncrypted: boolean;
 };
 
 function toRecord(doc: {
@@ -71,7 +76,11 @@ function toRecord(doc: {
 	return {
 		id: doc._id.toString(),
 		outputRef: doc.outputRef,
-		outputTitle: doc.outputTitle,
+		outputTitle: encryptResearchTitleForAdmin(
+			doc.outputTitle,
+			doc.ownerId?.toString() ?? null,
+			doc.universityId?.toString() ?? null,
+		),
 		outputType: doc.outputType as ContributionOutputType,
 		ownerId: doc.ownerId?.toString() ?? null,
 		ownerName: doc.ownerName ?? "",
@@ -81,7 +90,12 @@ function toRecord(doc: {
 		department: doc.department ?? null,
 		programme: doc.programme ?? null,
 		aiAssisted: doc.aiAssisted !== false,
-		contributionSummary: doc.contributionSummary ?? "",
+		contributionSummary: redactTitleInText(
+			doc.contributionSummary ?? "",
+			doc.outputTitle,
+			doc.ownerId?.toString() ?? null,
+			doc.universityId?.toString() ?? null,
+		),
 		toolsUsed: doc.toolsUsed ?? [],
 		modelNames: doc.modelNames ?? [],
 		humanEdited: Boolean(doc.humanEdited),
@@ -93,7 +107,12 @@ function toRecord(doc: {
 		generatedAt: (doc.generatedAt ?? doc.createdAt).toISOString(),
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
+		titleEncrypted: true,
 	};
+}
+
+function auditTitle(title: string, ownerId?: string | null, universityId?: string | null) {
+	return encryptResearchTitleForAdmin(title, ownerId, universityId);
 }
 
 function scopeFilter(scope?: AdminScope): Record<string, unknown> {
@@ -271,7 +290,7 @@ export async function createContributionStatement(
 			action: "contribution.recorded",
 			category: "ai_use",
 			actorId,
-			summary: `Recorded AI contribution statement for “${doc.outputTitle}”`,
+			summary: `Recorded AI contribution statement for “${auditTitle(doc.outputTitle, doc.ownerId?.toString(), doc.universityId?.toString())}”`,
 			targetType: "ai_contribution_statement",
 			targetId: doc._id.toString(),
 			details: { outputRef: doc.outputRef, outputType: doc.outputType },
@@ -320,7 +339,7 @@ export async function verifyContributionStatement(
 		action: input.verified ? "contribution.verified" : "contribution.updated",
 		category: "admin",
 		actorId,
-		summary: `${input.verified ? "Verified" : "Updated"} AI contribution statement for “${doc.outputTitle}”`,
+		summary: `${input.verified ? "Verified" : "Updated"} AI contribution statement for “${auditTitle(doc.outputTitle, doc.ownerId?.toString(), doc.universityId?.toString())}”`,
 		targetType: "ai_contribution_statement",
 		targetId: id,
 	});

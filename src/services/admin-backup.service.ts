@@ -14,7 +14,6 @@ import { GovernancePolicyModel } from "../db/models/GovernancePolicy.js";
 import { GovernanceReportModel } from "../db/models/GovernanceReport.js";
 import { GovernanceRiskModel } from "../db/models/GovernanceRisk.js";
 import { ResearchIdeaSessionModel } from "../db/models/ResearchIdeaSession.js";
-import { SavedCoursePlanModel } from "../db/models/SavedCoursePlan.js";
 import { SavedResearchModel } from "../db/models/SavedResearch.js";
 import { SavedResearchIdeaModel } from "../db/models/SavedResearchIdea.js";
 import { SavedResearchOutlineModel } from "../db/models/SavedResearchOutline.js";
@@ -54,7 +53,6 @@ const BACKUP_MODELS: BackupModelEntry[] = [
 	{ key: "saved_research_ideas", label: "Saved research ideas", model: SavedResearchIdeaModel },
 	{ key: "saved_research_outlines", label: "Saved research outlines", model: SavedResearchOutlineModel },
 	{ key: "research_idea_sessions", label: "Research idea sessions", model: ResearchIdeaSessionModel },
-	{ key: "saved_course_plans", label: "Saved course plans", model: SavedCoursePlanModel },
 	{ key: "output_artifacts", label: "Output artifacts", model: OutputArtifactModel },
 	{ key: "governance_policies", label: "Governance policies", model: GovernancePolicyModel },
 	{ key: "audit_logs", label: "Audit logs", model: AuditLogModel },

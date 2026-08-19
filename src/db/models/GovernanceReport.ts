@@ -5,7 +5,7 @@ const governanceReportSchema = new Schema(
 		title: { type: String, required: true, trim: true },
 		audience: {
 			type: String,
-			enum: ["management", "senate", "both"],
+			enum: ["management", "senate", "both", "external_auditors"],
 			required: true,
 			index: true,
 		},

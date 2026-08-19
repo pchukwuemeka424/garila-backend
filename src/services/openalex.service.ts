@@ -150,8 +150,6 @@ export async function searchOpenAlexPapers(
 	if (!trimmed || !isOpenAlexEnabled()) return [];
 
 	const apiKey = getOpenAlexApiKey();
-	if (!apiKey) return [];
-
 	const limit = Math.min(Math.max(options?.limit ?? 8, 1), 50);
 	const url = new URL(`${getOpenAlexApiBase().replace(/\/$/, "")}/works`);
 	url.searchParams.set("search", trimmed.slice(0, 400));
@@ -172,7 +170,8 @@ export async function searchOpenAlexPapers(
 			"ids",
 		].join(","),
 	);
-	url.searchParams.set("api_key", apiKey);
+	/** Key optional — polite pool works without it; key raises rate limits. */
+	if (apiKey) url.searchParams.set("api_key", apiKey);
 
 	const response = await fetchWithTimeout(
 		url.toString(),

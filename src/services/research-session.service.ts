@@ -18,7 +18,7 @@ export type ResearchIdeaSessionDto = {
 	userId: string;
 	discipline: string;
 	topic: string;
-	scope: "undergraduate" | "masters" | "doctoral" | "faculty";
+	scope: "assignment" | "conference" | "dissertation" | "faculty" | "journal" | "proposal" | "report" | "thesis" | "undergraduate_project";
 	ideas: ResearchIdeaInput[];
 	createdAt: string;
 	updatedAt: string;
@@ -102,7 +102,7 @@ export async function saveResearchIdeaSession(
 	input: {
 		discipline: string;
 		topic: string;
-		scope: "undergraduate" | "masters" | "doctoral" | "faculty";
+		scope: "assignment" | "conference" | "dissertation" | "faculty" | "journal" | "proposal" | "report" | "thesis" | "undergraduate_project";
 		ideas: ResearchIdeaInput[];
 	},
 ): Promise<ResearchIdeaSessionDto> {

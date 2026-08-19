@@ -15,6 +15,7 @@ import {
 	listUsers,
 	updateUser,
 } from "./dashboard.service.js";
+import { listUserGovernanceHistory as listAuditHistoryForUser } from "./admin-audit.service.js";
 
 export {
 	getDashboardStats,
@@ -55,6 +56,13 @@ export async function resetUserPassword(id: string, password: string, scope?: Ad
 		lastActiveAt: user.lastActiveAt?.toISOString() ?? null,
 		createdAt: user.createdAt.toISOString(),
 	};
+}
+
+export async function getUserGovernanceHistory(id: string, scope?: AdminScope) {
+	const user = await getAdminUserById(id, scope);
+	if (!user) return null;
+	const events = await listAuditHistoryForUser({ id: user.id, email: user.email }, scope);
+	return { user, events };
 }
 
 export async function bulkUpdateUserStatus(

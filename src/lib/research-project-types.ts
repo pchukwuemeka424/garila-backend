@@ -127,8 +127,8 @@ export const RESEARCH_PROJECT_TYPE_OPTIONS: ResearchProjectTypeOption[] = [
 	},
 	{
 		id: "journal_article",
-		label: "Journal article",
-		description: "Compact structure for journal submissions.",
+		label: "Journal/Research Paper",
+		description: "Compact structure for journal or research paper submissions.",
 		sections: [
 			{ id: "title", title: "Title" },
 			{ id: "abstract", title: "Abstract" },

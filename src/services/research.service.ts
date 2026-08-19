@@ -1,10 +1,20 @@
 import { Types } from "mongoose";
 
 import { OutputArtifactModel } from "../db/models/OutputArtifact.js";
+import { ResearchDocumentModel } from "../db/models/ResearchDocument.js";
 import { SavedResearchModel } from "../db/models/SavedResearch.js";
 import { listOutputs, readOutputFile, type OutputEntry } from "../server/outputs.js";
+import {
+	buildResearchFigureBlock,
+	figureMime,
+	injectSavedFiguresIntoPaper,
+	isImageFile,
+	MAX_FIGURE_DATA_URL_CHARS,
+	MAX_PAPER_FIGURES,
+} from "../lib/research-figure-blocks.js";
 import { extractPaperTitle, titleQuality } from "../lib/research-paper-title.js";
 import type { TokenUsage } from "../types/token-usage.js";
+import { loadAttachmentDataUrl } from "./attachment-storage.service.js";
 
 const MAX_CONTENT_BYTES = 500_000;
 const TEXT_EXTENSIONS = new Set([".md", ".txt", ".json", ".csv", ".log"]);
@@ -22,6 +32,7 @@ export type SavedResearchDto = {
 	sources: {
 		documentIds: string[];
 		datasetIds: string[];
+		questionnaireIds: string[];
 		noteIds: string[];
 		projectIds: string[];
 	};
@@ -30,18 +41,33 @@ export type SavedResearchDto = {
 	updatedAt: string;
 };
 
-function normalizeSources(raw?: {
+export type SavedResearchSourcesInput = {
 	documentIds?: string[] | null;
 	datasetIds?: string[] | null;
+	questionnaireIds?: string[] | null;
 	noteIds?: string[] | null;
 	projectIds?: string[] | null;
-} | null) {
+};
+
+function normalizeSources(raw?: SavedResearchSourcesInput | null) {
 	return {
 		documentIds: Array.isArray(raw?.documentIds) ? raw.documentIds.map(String) : [],
 		datasetIds: Array.isArray(raw?.datasetIds) ? raw.datasetIds.map(String) : [],
+		questionnaireIds: Array.isArray(raw?.questionnaireIds) ? raw.questionnaireIds.map(String) : [],
 		noteIds: Array.isArray(raw?.noteIds) ? raw.noteIds.map(String) : [],
 		projectIds: Array.isArray(raw?.projectIds) ? raw.projectIds.map(String) : [],
 	};
+}
+
+function hasSourceIds(raw?: SavedResearchSourcesInput | null): boolean {
+	const next = normalizeSources(raw);
+	return Boolean(
+		next.documentIds.length ||
+			next.datasetIds.length ||
+			next.questionnaireIds.length ||
+			next.noteIds.length ||
+			next.projectIds.length,
+	);
 }
 
 function toSavedResearchDto(doc: {
@@ -54,12 +80,7 @@ function toSavedResearchDto(doc: {
 	content: string;
 	aiBaselineContent?: string | null;
 	humanEdited?: boolean | null;
-	sources?: {
-		documentIds?: string[] | null;
-		datasetIds?: string[] | null;
-		noteIds?: string[] | null;
-		projectIds?: string[] | null;
-	} | null;
+	sources?: SavedResearchSourcesInput | null;
 	tokenUsage?: TokenUsage | null;
 	createdAt: Date;
 	updatedAt: Date;
@@ -89,12 +110,7 @@ export async function saveResearchPaper(input: {
 	topic: string;
 	content: string;
 	tokenUsage?: TokenUsage;
-	sources?: {
-		documentIds?: string[];
-		datasetIds?: string[];
-		noteIds?: string[];
-		projectIds?: string[];
-	} | null;
+	sources?: SavedResearchSourcesInput | null;
 }): Promise<SavedResearchDto> {
 	const topic = input.topic.trim();
 	const content = input.content.trim();
@@ -121,7 +137,7 @@ export async function saveResearchPaper(input: {
 		// Fresh AI generation — reset baseline for effort scoring.
 		existing.aiBaselineContent = content;
 		existing.humanEdited = false;
-		existing.sources = sources;
+		if (hasSourceIds(input.sources)) existing.sources = sources;
 		if (input.sessionId) existing.sessionId = new Types.ObjectId(input.sessionId);
 		if (input.tokenUsage) existing.tokenUsage = input.tokenUsage;
 		await existing.save();
@@ -141,6 +157,81 @@ export async function saveResearchPaper(input: {
 		...(input.tokenUsage ? { tokenUsage: input.tokenUsage } : {}),
 	});
 	return toSavedResearchDto(created);
+}
+
+export async function attachSavedResearchSources(
+	savedResearchId: string,
+	userId: string,
+	sources?: SavedResearchSourcesInput | null,
+): Promise<void> {
+	if (!hasSourceIds(sources) || !Types.ObjectId.isValid(savedResearchId)) return;
+	await SavedResearchModel.findOneAndUpdate(
+		{ _id: savedResearchId, userId: new Types.ObjectId(userId) },
+		{ $set: { sources: normalizeSources(sources) } },
+	);
+}
+
+export async function injectSavedFiguresIntoSavedPaper(
+	savedResearchId: string,
+	userId: string,
+	figureDocumentIds: string[],
+): Promise<void> {
+	const ids = figureDocumentIds
+		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
+		.slice(0, MAX_PAPER_FIGURES);
+	if (!ids.length || !Types.ObjectId.isValid(savedResearchId)) return;
+
+	const paper = await SavedResearchModel.findOne({
+		_id: new Types.ObjectId(savedResearchId),
+		userId: new Types.ObjectId(userId),
+	});
+	if (!paper) return;
+	if (/```research-figure\b/i.test(paper.content)) return;
+
+	const docs = await ResearchDocumentModel.find({
+		userId: new Types.ObjectId(userId),
+		_id: { $in: ids.map((id) => new Types.ObjectId(id)) },
+	});
+	const byId = new Map(docs.map((doc) => [doc._id.toString(), doc]));
+
+	const blocks: string[] = [];
+	let index = 0;
+	for (const id of ids) {
+		const doc = byId.get(id);
+		if (!doc || !isImageFile(doc.fileName, doc.fileMime ?? "")) continue;
+		try {
+			const loaded = await loadAttachmentDataUrl(doc);
+			if (!loaded || loaded.length > MAX_FIGURE_DATA_URL_CHARS) continue;
+			const mime = figureMime(doc.fileName, doc.fileMime ?? "");
+			const comma = loaded.indexOf(",");
+			const payload = comma >= 0 ? loaded.slice(comma + 1) : loaded;
+			const dataUrl = loaded.startsWith("data:image/")
+				? loaded
+				: `data:${mime};base64,${payload}`;
+			if (!dataUrl.startsWith("data:image/")) continue;
+			index += 1;
+			blocks.push(
+				buildResearchFigureBlock({
+					index,
+					title: (doc.title ?? "").trim() || doc.fileName,
+					fileName: doc.fileName,
+					mime: doc.fileMime ?? "",
+					dataUrl,
+				}),
+			);
+		} catch {
+			/* Skip figures that cannot be loaded inline. */
+		}
+	}
+	if (!blocks.length) return;
+
+	const next = injectSavedFiguresIntoPaper(paper.content, blocks.join("\n\n"));
+	paper.content = next;
+	paper.title = extractPaperTitle(next, paper.topic);
+	if (!paper.humanEdited) {
+		paper.aiBaselineContent = next;
+	}
+	await paper.save();
 }
 
 function dedupeSavedResearch(rows: SavedResearchDto[]): SavedResearchDto[] {

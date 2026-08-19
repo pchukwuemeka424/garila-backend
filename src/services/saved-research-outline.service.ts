@@ -9,7 +9,7 @@ export type SavedResearchOutlineDto = {
 	ideaTitle: string;
 	discipline: string;
 	topic: string;
-	scope: "undergraduate" | "masters" | "doctoral" | "faculty";
+	scope: "assignment" | "conference" | "dissertation" | "faculty" | "journal" | "proposal" | "report" | "thesis" | "undergraduate_project";
 	outline: string;
 	createdAt: string;
 	updatedAt: string;
@@ -65,7 +65,7 @@ export async function saveResearchOutlineRecord(
 		ideaTitle: string;
 		discipline: string;
 		topic: string;
-		scope: "undergraduate" | "masters" | "doctoral" | "faculty";
+		scope: "assignment" | "conference" | "dissertation" | "faculty" | "journal" | "proposal" | "report" | "thesis" | "undergraduate_project";
 		outline: string;
 	},
 ): Promise<SavedResearchOutlineDto> {

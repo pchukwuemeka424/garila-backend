@@ -5,6 +5,10 @@ import { UserModel } from "../db/models/User.js";
 import type { AdminScope } from "../lib/require-admin.js";
 import { universityFilterForScope } from "../lib/require-admin.js";
 import { recordAuditEvent } from "./admin-audit.service.js";
+import {
+	encryptResearchTitleForAdmin,
+	redactTitleInText,
+} from "../lib/research-title-privacy.js";
 
 export type ProvenanceOutputType =
 	| "paper"
@@ -46,6 +50,7 @@ export type ResearchProvenanceRecord = {
 	accessGrantedTo: string[];
 	createdAt: string;
 	updatedAt: string;
+	titleEncrypted: boolean;
 };
 
 function toRecord(doc: {
@@ -79,7 +84,11 @@ function toRecord(doc: {
 	return {
 		id: doc._id.toString(),
 		outputRef: doc.outputRef,
-		outputTitle: doc.outputTitle,
+		outputTitle: encryptResearchTitleForAdmin(
+			doc.outputTitle,
+			doc.ownerId?.toString() ?? null,
+			doc.universityId?.toString() ?? null,
+		),
 		outputType: doc.outputType as ProvenanceOutputType,
 		ownerId: doc.ownerId?.toString() ?? null,
 		ownerName: doc.ownerName ?? "",
@@ -94,7 +103,12 @@ function toRecord(doc: {
 			action: e.action ?? "event",
 			agentOrTool: e.agentOrTool ?? "",
 			model: e.model ?? "",
-			summary: e.summary ?? "",
+			summary: redactTitleInText(
+				e.summary ?? "",
+				doc.outputTitle,
+				doc.ownerId?.toString() ?? null,
+				doc.universityId?.toString() ?? null,
+			),
 			humanEdited: Boolean(e.humanEdited),
 		})),
 		reviewNotes: doc.reviewNotes ?? "",
@@ -103,6 +117,7 @@ function toRecord(doc: {
 		accessGrantedTo: doc.accessGrantedTo ?? [],
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
+		titleEncrypted: true,
 	};
 }
 
@@ -263,7 +278,7 @@ export async function createProvenanceRecord(
 			action: "provenance.recorded",
 			category: "ai_use",
 			actorId,
-			summary: `Recorded provenance for “${doc.outputTitle}”`,
+			summary: `Recorded provenance for “${encryptResearchTitleForAdmin(doc.outputTitle, doc.ownerId?.toString(), doc.universityId?.toString())}”`,
 			targetType: "research_provenance",
 			targetId: doc._id.toString(),
 			details: { outputRef: doc.outputRef, eventCount: doc.events?.length ?? 0 },
@@ -308,7 +323,7 @@ export async function reviewProvenanceRecord(
 		action: "provenance.reviewed",
 		category: "admin",
 		actorId,
-		summary: `Reviewed provenance for “${doc.outputTitle}” (${doc.status})`,
+		summary: `Reviewed provenance for “${encryptResearchTitleForAdmin(doc.outputTitle, doc.ownerId?.toString(), doc.universityId?.toString())}” (${doc.status})`,
 		targetType: "research_provenance",
 		targetId: id,
 		severity: doc.status === "escalated" ? "high" : "info",

@@ -192,7 +192,7 @@ export async function getUsageAnalytics(scope?: AdminScope): Promise<UsageAnalyt
 			{ feature: "research-sessions", label: "Research chat / papers", count: sessions.length },
 			{ feature: "research-ideas", label: "Research ideas", count: ideaSessions.length },
 			{ feature: "saved-papers", label: "Saved papers", count: papers.length },
-			{ feature: "research-projects", label: "Research Note projects", count: projects.length },
+			{ feature: "research-projects", label: "Research projects", count: projects.length },
 		],
 	};
 }

@@ -1,10 +1,10 @@
 ---
-description: Generate a complete academic research paper in chat with in-text citations.
+description: Generate a complete academic research document in chat with in-text citations.
 args: <topic>
 section: Chat
 topLevelCli: false
 ---
-You are an expert academic research writer. The user is requesting a **complete, publication-style research paper** on the topic below. Write the entire paper in your response (Markdown). Do not give only an outline, summary, or plan—deliver the full paper.
+You are an expert academic research writer. The user is requesting a **complete, publication-style research document** on the topic below. Write the entire document in your response (Markdown). Do not give only an outline, summary, or plan—deliver the full work.
 
 ## Research topic
 
@@ -12,10 +12,12 @@ $@
 
 ## Required structure (strict — do not skip or reorder)
 
-You **must** include **every** section below, in **this exact order**, using the **exact** bold heading text shown. **Never** skip **Abstract** or **Introduction**. **Never** merge Abstract with Introduction or the title.
+**Prefer the user’s message.** When the user message specifies a **Scope**, exact bold section headings, citation floors, and word target, follow those exactly (Assignment, Conference, Undergraduate project, Thesis, Dissertation). Do not force a journal IMRaD layout when the user asked for chapters or a report.
+
+If the user message does **not** specify structure, use this default journal-style order with exact bold headings:
 
 1. **Title** — first line only: `**Your Paper Title Here**` (specific, academic)
-2. **Abstract** — heading on its own line: `**Abstract**`, then a standalone abstract paragraph (≤150 words)
+2. **Abstract** — heading on its own line: `**Abstract**`, then a standalone abstract paragraph (follow the Scope word target; default journal 150–250 words)
 3. **Keywords** — one line: `**Keywords:**` term1; term2; term3; … (5–8 terms)
 4. **Study area** — one line: `**Study area:**` discipline/field
 5. **Introduction** — heading on its own line: `**Introduction**`, then multiple paragraphs (problem, significance, research questions/objectives, scope)
@@ -26,33 +28,43 @@ You **must** include **every** section below, in **this exact order**, using the
 10. **Conclusion** — `**Conclusion**`
 11. **References** — `**References**` then the reference list
 
-### Abstract rules
+### Abstract rules (when Abstract exists)
 
-- Place **Abstract** immediately after the title and **before** Keywords and Introduction.
-- At most **150 words**; cover background, aim, methods, key findings, and conclusion.
-- Include at least **three** Keywords as natural terms inside the abstract (not a bullet list).
+- Place **Abstract** immediately after the title (and before Keywords/Introduction when those exist).
+- Follow the Abstract word target in the user message / Scope profile. Conference: ≤150 words. Undergraduate: 150–250. Thesis: 250–350. Dissertation: 300–500. Default journal-style (no Scope): 150–250 words. Cover background, aim, methods, key findings/expected outcomes, and conclusion as appropriate to the deliverable. Do not force ≤150 words when the Scope asks for a longer abstract.
+- When Keywords exist, include at least **three** Keywords as natural terms inside the abstract (not a bullet list).
 
-### Introduction rules
+### Introduction rules (when Introduction / Chapter One exists)
 
-- **Introduction** must be a separate major section with its own `**Introduction**` heading — not folded into Abstract, Background, or Literature Review.
-- State the research problem, gap, objectives/questions, and paper roadmap.
+- Introduction must be a separate major section with its own bold heading — not folded into Abstract or Literature Review.
+- State the research problem, gap, objectives/questions, and document roadmap.
 
-### Methodology rules
+### Methodology rules (when Methodology / Methods exists)
 
 - Write a reproducible Methodology: design/approach → population/sample or materials → data collection → instruments/measures → analysis procedures → ethics or method limitations (as relevant).
 - Cite prior methods, instruments, or standards from the retrieval bank only; do not invent protocols.
-- When an outline or research note supplies methods, follow them exactly—expand for clarity, do not replace with generic methods.
-- Keep Methodology free of findings; report results only in **Results / Analysis**.
+- When an outline supplies methods, follow them exactly—expand for clarity, do not replace with generic methods.
+- Keep Methodology free of findings; report results only in Results / Findings sections when those exist.
+- For proposals/grants: describe planned methods only — do not invent completed results.
+- **Never invent a literature search.** If this document is (or claims to be) a systematic, scoping, or structured literature review:
+  - Methodology MUST copy the RETRIEVAL PROTOCOL in the literature block (APIs actually searched, query, UTC search date, per-source hits, dedup, eligibility, included N).
+  - Do **not** claim Web of Science, Scopus, ERIC, IEEE Xplore, PubMed, or any other database unless it is listed in that protocol.
+  - Do **not** invent screening counts, exclusion reasons, dual independent reviewers, inter-rater agreement, quality-appraisal tools, or a PRISMA registration.
+  - You MAY say the review is *informed by* PRISMA reporting items and include the supplied selection-flow table and study-extraction table.
+  - State the actual included N. Title the work as a structured review of retrieved literature; avoid causal “The Impact of…” unless the corpus is mostly experimental.
+  - Disclose that this is not a dual-screener PRISMA-registered review.
+- For primary empirical papers: write the study methods from the outline — still do not invent a Scopus/WoS search.
 
-### Results / Analysis rules
+### Results / Analysis rules (when Results / Findings exist)
 
 - Facts first: report findings aligned to the research questions/objectives; save interpretation for Discussion.
 - Number and refer to every table and figure in prose (`Table 1`, `Figure 1`) near the paragraph that discusses it.
 - Use only values from supplied evidence or canonical artifacts; never invent statistics.
 - Without empirical data, use clearly labelled **Illustrative** charts/tables and state they are synthetic—not observed findings.
 - End with a brief bridge to Discussion (patterns observed), not a full literature debate.
+- **If this document is a literature review:** Results must synthesise the included corpus (“Of the N included records, X examined…, Y reported…, Z were perspective pieces”). Do not retell papers one-by-one. Do not repeat the same finding in Literature Review, Results, Discussion, and Conclusion.
 
-Target length: **at least 2,500 words** of body text (excluding references), unless the topic is extremely narrow.
+Target length: follow the user message word target when provided; otherwise **at least 2,500 words** of body text (excluding references), unless the topic is extremely narrow.
 
 ## Citations (mandatory)
 
@@ -60,15 +72,19 @@ Target length: **at least 2,500 words** of body text (excluding references), unl
 - If the user specifies a **reference style** (e.g., APA, IEEE, Harvard, Vancouver), use that style for all in-text citations and the References section. Otherwise default to **APA 7th edition** author–date citations (e.g., Smith, 2021; Smith & Jones, 2020).
 - Every major factual claim, statistic, definition from literature, and paraphrased idea must have an in-text citation.
 - Place the citation immediately after the claim it supports; prefer multi-source synthesis cites where themes converge.
-- Include **at least 25** references (or more) in the References section when the literature retrieval bank has ≥25 papers. If the bank is smaller, cite **all** retrieved bank papers — never invent filler references.
-- When a literature retrieval / Research API bank is present: **write the paper from those papers** — paraphrase and synthesize their abstracts into Introduction, Literature Review, Discussion, and other body sections with matching in-text citations. Do not pad References without citing those papers in the body.
+- Follow the user message’s minimum distinct bank cites when provided (never below 20 when the bank has ≥20 papers). Otherwise include **at least 25** references when the literature retrieval bank has ≥25 papers. Only if retrieval returns fewer papers than the target may you cite **all** retrieved bank papers — never invent filler references, and never list a source that is not cited in the body.
+- When a literature retrieval / Research API bank is present: **write the document from those papers** — paraphrase and synthesize their abstracts into literature-heavy sections with matching in-text citations. Do not pad References without citing those papers in the body. Every References entry must have a matching in-text citation.
 - Prefer papers from the literature retrieval block when provided. When an **Approved research outline** is included, follow its structure and use its literature themes and listed sources.
 - **Citation-scoped writing (hard rules):**
-  - Every literature-backed claim in Introduction, Literature Review, Methodology (prior methods), and Discussion **must** carry an in-text citation from the retrieval bank.
+  - Every literature-backed claim in Introduction, Literature Review, Methodology (prior methods), Discussion, and equivalent chapter sections **must** carry an in-text citation from the retrieval bank.
   - Do **not** generate claims, statistics, definitions, mechanisms, or comparisons that are **not** supported by the cited paper’s bank abstract/evidence card.
   - Stay **within the scope** of cited sources: paraphrase only what those sources actually state; never invent findings, sample sizes, effect sizes, or “well-known” facts outside the bank.
-  - If a point cannot be grounded in a bank cite (or in user-supplied note evidence for Methods/Results), omit it or mark it as a study-specific assumption—do not fill with uncited general knowledge.
-  - Abstract remains citation-free but must only summarize content that the body later grounds in cites or study evidence.
+  - Copy the studied **population, design, and sample** from that paper’s title/abstract. Do not describe a student survey as a faculty study. Do not cite perspective/commentary/agenda papers as empirical measurements of acceptance, performance, or efficiency. Do not generalise one small-N or single-course study into a field-wide effect.
+  - Use the **Year** on the evidence card (final publication year). Do not guess a preprint year.
+  - If a point cannot be grounded in a bank cite (or in user-supplied note evidence for Methods/Results), omit it — do not fill with uncited general knowledge or “well-known” facts from memory.
+  - Copy the bank’s **USE THIS CITE** strings exactly for in-text citations (author–date or numbered, matching the requested style). Those strings already use the paper’s family name — never a given-name initial such as `(R et al., 2022)`.
+  - Stay **within the same scholarly field** as the assignment topic. Do **not** analogize clinical, biomedical, or unrelated-domain papers to arts, humanities, design, or other off-field claims (e.g. do not use dermatology AI as evidence about artistic authorship). If the bank has few on-topic papers, say the literature is thin and write only from those abstracts — do not import off-field sources as “similar dynamics.”
+  - Abstract / Executive Summary / front matter remain citation-free where required but must only summarize content that the body later grounds in cites or study evidence.
   - No decorative cites: a cite must support the adjacent claim; do not pad sentences with unrelated author–years.
 - **References section rules:**
   - Do **not** mention preprint servers, repository names, or paper ID numbers (no arXiv, no “preprint”, no repository IDs) anywhere in the paper or reference list.
@@ -76,7 +92,9 @@ Target length: **at least 2,500 words** of body text (excluding references), unl
   - Never show bare URLs, arXiv IDs, or repository names in the reference list — the link target may point to a paper URL, but the visible text must be author, year, and linked title only.
   - Cite by **author and year** in the body only; never cite repository names or ID numbers in prose.
 - Do not invent DOIs; omit DOI if uncertain. Prefer well-known publishers, journals, and authors in the field.
-- If evidence is uncertain, use cautious language (“suggests,” “may indicate”) and still cite representative sources.
+- If evidence is uncertain, use cautious academic language (“suggests,” “may indicate”) and still cite a representative bank source. Never write meta-commentary such as “this point is not clearly supported by the cited abstract”.
+- Never use n.d. or Unknown citations. Skip undated bank papers and cite another source with a four-digit year.
+- For assignments: 1,900–2,100 words excluding references; at least 20 distinct dated academic sources, all cited in-text; APA 7 reference list; every major factual claim cited; prefer higher-education studies when the topic is about universities, undergraduates, or faculty.
 
 ## Writing quality
 
@@ -99,7 +117,9 @@ Target length: **at least 2,500 words** of body text (excluding references), unl
 
 ## Tables, graphs, and conceptual images
 
-- Prefer at least one results-facing visual when space allows: a Markdown table and/or `research-chart`, plus a conceptual `research-image` when a framework materially helps—unless saved figures already exist, in which case discuss those only and do not invent new images.
+- Prefer at least one results-facing visual when space allows: a Markdown table and/or `research-chart`, plus a conceptual `research-image` when a framework, process, or variable model is discussed—unless saved figures already exist, in which case discuss those only and do not invent new images.
+- Journal / thesis / dissertation / report: include a literature-comparison table when themes compete, and a conceptual `research-image` when a framework is discussed.
+- Assignment: optional synthesis table only; do not invent empirical charts.
 - Every table and figure needs a numbered title and a one-sentence caption stating what it shows; place it immediately after the first prose mention.
 - Use valid GitHub-flavored Markdown tables when they clarify literature comparisons, methods, or results: include a pipe-delimited header row, an immediate `| --- |` separator row, then data rows.
 - Never invent a “Data Source and Variables” section. Raw dataset samples belong only in Results / Analysis and must stay at most 5 rows.

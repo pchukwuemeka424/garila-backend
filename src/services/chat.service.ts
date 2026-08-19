@@ -7,9 +7,20 @@ import { SessionModel } from "../db/models/Session.js";
 import { UserModel } from "../db/models/User.js";
 import type { AppContext } from "../lib/app-context.js";
 import {
+	getScopeProfile,
+	literatureBankFetchLimit,
+	parseScopeFromPrompt,
+} from "../lib/research-scope-profiles.js";
+import {
+	buildLiteratureSearchQuery,
 	buildPaperSearchContext,
+	parseDisciplineFromPrompt,
 	shouldUseAlphaXiv,
+	type AlphaXivPaper,
+	type RetrievalProtocol,
 } from "./alphaxiv.service.js";
+import { alignCitationsAndFactCheck } from "./citation-align.service.js";
+import { parseCitationStyleLabel } from "../lib/citation-bank.js";
 import { evaluatePolicy } from "./admin-policy.service.js";
 import type { TokenUsage } from "../types/token-usage.js";
 import { streamOpenRouterChat, type ChatTurn } from "./llm.service.js";
@@ -31,6 +42,8 @@ export class ChatService {
 	private lastError: string | null = null;
 	private abortController: AbortController | null = null;
 	private lastSavedResearchId: string | null = null;
+	private literatureBank: AlphaXivPaper[] = [];
+	private literatureProtocol: RetrievalProtocol | undefined;
 	private readonly subscribers = new Set<Subscriber>();
 
 	constructor(private readonly ctx: AppContext) {}
@@ -80,6 +93,8 @@ export class ChatService {
 	}): Promise<void> {
 		await this.abort();
 		this.lastSavedResearchId = null;
+		this.literatureBank = [];
+		this.literatureProtocol = undefined;
 		this.setState("starting");
 
 		const workflow = options?.workflow?.replace(/^\//, "");
@@ -141,7 +156,10 @@ export class ChatService {
 		const userMessages = history.filter((turn) => turn.role === "user");
 		if (userMessages.length !== 1) return history;
 
-		const query = options.topic?.trim() || options.userMessage.trim();
+		const query = buildLiteratureSearchQuery({
+			topic: options.topic?.trim() || options.userMessage.trim(),
+			discipline: parseDisciplineFromPrompt(options.userMessage),
+		});
 		if (!query) return history;
 
 		this.emit({
@@ -152,9 +170,27 @@ export class ChatService {
 		try {
 			const isChatPaper =
 				(options.workflow ?? "").replace(/^\//, "") === "chat-paper";
+			const scope =
+				parseScopeFromPrompt(options.userMessage) ||
+				parseScopeFromPrompt(
+					history.find((turn) => turn.role === "user")?.content ?? "",
+				) ||
+				"journal";
+			const profile = getScopeProfile(scope);
+			const healthHint = [
+				options.userMessage,
+				options.topic,
+				history.find((turn) => turn.role === "user")?.content ?? "",
+			]
+				.filter(Boolean)
+				.join("\n");
 			const result = await buildPaperSearchContext(query, {
 				signal: this.abortController?.signal,
-				...(isChatPaper ? { limit: 30 } : {}),
+				scope,
+				minDistinctCites: profile.minDistinctCites,
+				healthHint,
+				citationStyle: parseCitationStyleLabel(options.userMessage),
+				...(isChatPaper ? { limit: literatureBankFetchLimit(scope) } : {}),
 			});
 
 			this.emit({
@@ -163,6 +199,9 @@ export class ChatService {
 			});
 
 			if (!result) return history;
+
+			this.literatureBank = result.papers;
+			this.literatureProtocol = result.protocol;
 
 			const retrievalLabel =
 				result.source === "library"
@@ -177,9 +216,13 @@ export class ChatService {
 									? "OpenAlex literature retrieval"
 									: result.source === "pubmed"
 										? "PubMed literature retrieval"
-										: result.source === "alphaxiv-mcp"
-											? "AlphaXiv MCP literature retrieval"
-											: "AlphaXiv literature retrieval";
+										: result.source === "doaj"
+											? "DOAJ literature retrieval"
+											: result.source === "europepmc"
+												? "Europe PMC literature retrieval"
+												: result.source === "alphaxiv-mcp"
+													? "AlphaXiv MCP literature retrieval"
+													: "AlphaXiv literature retrieval";
 			const contextBlock = `[${retrievalLabel}]\n\n${result.context}`;
 			const systemIndex = history.findIndex((turn) => turn.role === "system");
 			if (systemIndex < 0) return history;
@@ -204,7 +247,7 @@ export class ChatService {
 			});
 
 			const message = error instanceof Error ? error.message : String(error);
-			const contextBlock = `[Literature retrieval failed: ${message}. Continue with cautious citations and clearly mark uncertain sources.]`;
+			const contextBlock = `[Literature retrieval failed: ${message}. Do not invent authors, years, titles, or DOIs. Omit literature claims that cannot be grounded in user-supplied evidence.]`;
 			const systemIndex = history.findIndex((turn) => turn.role === "system");
 			if (systemIndex < 0) return history;
 
@@ -285,7 +328,15 @@ export class ChatService {
 
 		let assistantText = "";
 		try {
-			const maxTokens = session?.workflow === "chat-paper" ? 12_000 : undefined;
+			const scopeFromHistory =
+				parseScopeFromPrompt(trimmed) ||
+				parseScopeFromPrompt(
+					history.find((turn) => turn.role === "user")?.content ?? "",
+				) ||
+				"journal";
+			const profile = getScopeProfile(scopeFromHistory);
+			const maxTokens =
+				session?.workflow === "chat-paper" ? profile.maxTokens : undefined;
 			const { text, usage } = await streamOpenRouterChat(llmHistory, {
 				signal: this.abortController.signal,
 				maxTokens,
@@ -303,6 +354,16 @@ export class ChatService {
 
 			if (session?.workflow === "chat-paper") {
 				assistantText = formatResearchPaperReferences(assistantText);
+				assistantText = await alignCitationsAndFactCheck(
+					assistantText,
+					this.literatureBank,
+					trimmed,
+					{
+						signal: this.abortController?.signal,
+						protocol: this.literatureProtocol,
+						topic: session?.topic ?? trimmed,
+					},
+				);
 			}
 
 			await MessageModel.create({

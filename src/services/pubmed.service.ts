@@ -118,9 +118,8 @@ export async function searchPubmedPapers(
 	const trimmed = query.trim();
 	if (!trimmed || !isPubmedEnabled()) return [];
 
+	/** Key optional — basic E-utilities work without it; key raises rate limits. */
 	const apiKey = getPubmedApiKey();
-	if (!apiKey) return [];
-
 	const limit = Math.min(Math.max(options?.limit ?? 8, 1), 50);
 	const base = getPubmedApiBase().replace(/\/$/, "");
 

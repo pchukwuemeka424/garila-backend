@@ -44,20 +44,13 @@ import {
 } from "./services/research-jobs.service.js";
 import { listWorkflows } from "./services/workflows.js";
 import { fetchPapersForQuery } from "./services/alphaxiv.service.js";
-import { generateResearchOutline } from "./services/outline.service.js";
+import { abortSignalFromRequest } from "./lib/request-abort.js";
+import { generateResearchOutline, normalizeResearchScope } from "./services/outline.service.js";
 import { generateResearchIdeas } from "./services/research-ideas.service.js";
 import {
 	assertStudentHasTokenBalance,
 	deductStudentTokens,
 } from "./services/student-token.service.js";
-import { generateCoursePresentation } from "./services/lesson-presentation.service.js";
-import { generateCourseOutline } from "./services/lesson-planner.service.js";
-import {
-	deleteSavedCoursePlan,
-	getSavedCoursePlan,
-	listSavedCoursePlans,
-	saveCoursePlan,
-} from "./services/lesson-planner-save.service.js";
 import {
 	deleteAllSavedResearchIdeas,
 	deleteSavedResearchIdea,
@@ -80,41 +73,35 @@ import {
 	completeDatasetDirectUpload,
 	createDataset,
 	createDocument,
-	createNote,
 	createProject,
+	createQuestionnaire,
 	createReference,
 	deleteDataset,
 	deleteDocument,
-	deleteNote,
 	deleteProject,
+	deleteQuestionnaire,
 	deleteReference,
 	getDataset,
 	getDatasetFile,
 	getDocumentFile,
-	getNotebookData,
 	getOrCreateProject,
 	getProject,
 	getWorkspaceBundle,
+	importQuestionnaireResponses,
 	listActivity,
 	listDatasets,
 	listDocuments,
-	listNotes,
 	listProjects,
+	listQuestionnaires,
 	listReferences,
-	saveNotebookData,
-	updateNote,
 	updateProject,
+	updateQuestionnaire,
 } from "./services/research-assets.service.js";
 import { buildPaperVisualizationArtifacts, plotDatasetGraph } from "./services/research-graph.service.js";
 import {
 	buildResearchSourceContext,
 	type ResearchSourceSelection,
 } from "./services/research-source-context.service.js";
-import {
-	adminDeleteLecture,
-	getLectureAdminStats,
-	listAllLectures,
-} from "./services/admin-lessons.service.js";
 import {
 	deleteAdminSession,
 	getAdminSession,
@@ -129,16 +116,12 @@ import {
 	setUserTokensUsed,
 } from "./services/admin-tokens.service.js";
 import {
-	bulkDeleteAdminResearchNotebooks,
 	bulkDeleteAdminResearchPapers,
 	bulkDeleteAdminResearchUploads,
-	deleteAdminResearchNotebook,
 	deleteAdminResearchPaper,
 	deleteAdminResearchUpload,
-	getAdminResearchNotebook,
 	getAdminResearchPaper,
 	getAdminResearchStats,
-	listAdminResearchNotebooks,
 	listAdminResearchPapers,
 	listAdminResearchUploads,
 	type AdminResearchUploadKind,
@@ -150,6 +133,7 @@ import {
 	deleteUser as adminDeleteUser,
 	getAdminUserById,
 	getDashboardStats as adminGetDashboardStats,
+	getUserGovernanceHistory,
 	listConsoleAdmins as adminListConsoleAdmins,
 	listRecentSessions as adminListRecentSessions,
 	listRecentSessionTopics as adminListRecentSessionTopics,
@@ -188,11 +172,7 @@ import {
 	recordAuditEvent,
 } from "./services/admin-audit.service.js";
 import {
-	createApproval,
-	getApprovalStats,
-	listApprovals,
 	normalizeApprovalDefaults,
-	reviewApproval,
 } from "./services/admin-approvals.service.js";
 import { getGovernanceDashboard } from "./services/admin-governance.service.js";
 import {
@@ -211,20 +191,10 @@ import {
 	normalizeGovernanceReportDefaults,
 } from "./services/admin-reports.service.js";
 import {
-	createRisk,
-	deleteRisk,
-	getRiskStats,
-	listRisks,
 	normalizeRiskDefaults,
-	updateRisk,
 } from "./services/admin-risk.service.js";
 import {
-	createComplianceControl,
-	getComplianceStats,
-	listComplianceControls,
 	normalizeComplianceDefaults,
-	updateComplianceControl,
-	deleteComplianceControl,
 } from "./services/admin-compliance.service.js";
 import {
 	createIncident,
@@ -275,24 +245,28 @@ import {
 	updateRetentionPolicy,
 } from "./services/admin-retention.service.js";
 import {
-	createAiSystem,
-	deleteAiSystem,
 	ensureDefaultAiSystems,
-	getAiSystemStats,
-	listAiSystems,
 	normalizeInventoryDefaults,
-	updateAiSystem,
 } from "./services/admin-inventory.service.js";
 import { cleanupSeededGovernanceMocks } from "./services/admin-governance-cleanup.service.js";
 import { ensureDefaultAdmin } from "./services/bootstrap-admin.service.js";
-import { handleGenerate as handleResearchNoteGenerate } from "./services/research-note-ai/handler.js";
 import { UserModel } from "./db/models/User.js";
+import { registerPortalRoutes } from "./routes/portal.js";
 
 async function resolveUserId(authorization?: string): Promise<string | null> {
 	const token = extractBearerToken(authorization);
 	if (!token) return null;
 	const payload = verifyAuthToken(token);
 	return payload?.sub ?? null;
+}
+
+function datasetErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		const msg = error.message?.trim();
+		if (msg && msg !== "UnknownError") return msg;
+		return "Could not save the dataset. Check the file and try again.";
+	}
+	return String(error);
 }
 
 function resolveUserIdFromWsUrl(urlPath: string | undefined): string | null {
@@ -588,6 +562,7 @@ export async function startServer(port: number): Promise<void> {
 			topic?: string;
 			scope?: string;
 			sources?: ResearchSourceSelection;
+			assignmentInstructions?: string;
 		};
 
 		if (!body.idea?.title?.trim()) {
@@ -600,10 +575,12 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(400).send({ error: "topic is required." });
 		}
 
-		const scope = body.scope?.trim();
-		const validScopes = new Set(["undergraduate", "masters", "doctoral", "faculty"]);
-		if (!scope || !validScopes.has(scope)) {
-			return reply.code(400).send({ error: "scope must be undergraduate, masters, doctoral, or faculty." });
+		const scope = normalizeResearchScope(body.scope?.trim());
+		if (!scope) {
+			return reply.code(400).send({
+				error:
+					"scope must be assignment, conference, dissertation, faculty, journal, proposal, report, thesis, or undergraduate_project.",
+			});
 		}
 
 		const ideaId = body.idea.id?.trim() || body.idea.title.trim();
@@ -614,31 +591,35 @@ export async function startServer(port: number): Promise<void> {
 				await assertStudentHasTokenBalance(userId);
 			}
 			const sourceContext = await buildResearchSourceContext(userId, body.sources);
-			const hasNoteSources = Boolean(
+			const hasSourceMaterial = Boolean(
 				body.sources?.projectIds?.length ||
-					body.sources?.noteIds?.length ||
 					body.sources?.documentIds?.length ||
-					body.sources?.datasetIds?.length,
+					body.sources?.datasetIds?.length ||
+					body.sources?.questionnaireIds?.length,
 			);
 
-			const result = await generateResearchOutline({
-				idea: {
-					title: body.idea.title.trim(),
-					rationale: body.idea.rationale?.trim() ?? "",
-					approach: body.idea.approach?.trim() ?? "",
-					type: body.idea.type?.trim() ?? "empirical",
-					feasibility: body.idea.feasibility?.trim() ?? "medium",
-					outline: body.idea.outline?.trim() || undefined,
-					researchQuestions: Array.isArray(body.idea.researchQuestions)
-						? body.idea.researchQuestions.map((q) => String(q).trim()).filter(Boolean)
-						: undefined,
+			const result = await generateResearchOutline(
+				{
+					idea: {
+						title: body.idea.title.trim(),
+						rationale: body.idea.rationale?.trim() ?? "",
+						approach: body.idea.approach?.trim() ?? "",
+						type: body.idea.type?.trim() ?? "empirical",
+						feasibility: body.idea.feasibility?.trim() ?? "medium",
+						outline: body.idea.outline?.trim() || undefined,
+						researchQuestions: Array.isArray(body.idea.researchQuestions)
+							? body.idea.researchQuestions.map((q) => String(q).trim()).filter(Boolean)
+							: undefined,
+					},
+					disciplineLabel: body.disciplineLabel.trim(),
+					topic: body.topic.trim(),
+					scope: scope,
+					sourceContext,
+					fast: hasSourceMaterial,
+					assignmentInstructions: body.assignmentInstructions?.trim() || undefined,
 				},
-				disciplineLabel: body.disciplineLabel.trim(),
-				topic: body.topic.trim(),
-				scope: scope as "undergraduate" | "masters" | "doctoral" | "faculty",
-				sourceContext,
-				fast: hasNoteSources,
-			});
+				{ signal: abortSignalFromRequest(request, reply) },
+			);
 
 			let tokenQuota;
 			if (userId && result.usage?.totalTokens) {
@@ -651,7 +632,7 @@ export async function startServer(port: number): Promise<void> {
 					ideaTitle: body.idea.title.trim(),
 					discipline: body.discipline?.trim() || body.disciplineLabel.trim(),
 					topic: body.topic.trim(),
-					scope: scope as "undergraduate" | "masters" | "doctoral" | "faculty",
+					scope: scope,
 					outline: result.outline,
 				});
 			}
@@ -663,6 +644,10 @@ export async function startServer(port: number): Promise<void> {
 				...(tokenQuota ? { tokenQuota } : {}),
 			};
 		} catch (error) {
+			if (error instanceof Error && error.name === "AbortError") {
+				if (!reply.sent) return reply.code(499).send({ error: "Request cancelled." });
+				return;
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			return reply.code(502).send({ error: message });
 		}
@@ -684,10 +669,12 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(400).send({ error: "topic is required." });
 		}
 
-		const scope = body.scope?.trim();
-		const validScopes = new Set(["undergraduate", "masters", "doctoral", "faculty"]);
-		if (!scope || !validScopes.has(scope)) {
-			return reply.code(400).send({ error: "scope must be undergraduate, masters, doctoral, or faculty." });
+		const scope = normalizeResearchScope(body.scope?.trim());
+		if (!scope) {
+			return reply.code(400).send({
+				error:
+					"scope must be assignment, conference, dissertation, faculty, journal, proposal, report, thesis, or undergraduate_project.",
+			});
 		}
 
 		try {
@@ -697,12 +684,15 @@ export async function startServer(port: number): Promise<void> {
 			}
 			const sourceContext = await buildResearchSourceContext(userId, body.sources);
 
-			const result = await generateResearchIdeas({
-				disciplineLabel: body.disciplineLabel.trim(),
-				topic: body.topic.trim(),
-				scope: scope as "undergraduate" | "masters" | "doctoral" | "faculty",
-				sourceContext,
-			});
+			const result = await generateResearchIdeas(
+				{
+					disciplineLabel: body.disciplineLabel.trim(),
+					topic: body.topic.trim(),
+					scope: scope,
+					sourceContext,
+				},
+				{ signal: abortSignalFromRequest(request, reply) },
+			);
 
 			let tokenQuota;
 			if (userId && result.usage?.totalTokens) {
@@ -715,181 +705,14 @@ export async function startServer(port: number): Promise<void> {
 				...(tokenQuota ? { tokenQuota } : {}),
 			};
 		} catch (error) {
+			if (error instanceof Error && error.name === "AbortError") {
+				if (!reply.sent) return reply.code(499).send({ error: "Request cancelled." });
+				return;
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			return reply.code(502).send({ error: message });
 		}
 	});
-
-	app.post("/api/lesson-planner/generate", async (request, reply) => {
-		const body = request.body as {
-			title?: string;
-			department?: string;
-			departmentLabel?: string;
-			level?: string;
-			mode?: string;
-			standards?: string;
-			sourceMaterial?: string;
-			sessionCount?: number;
-		};
-
-		if (!body.title?.trim()) {
-			return reply.code(400).send({ error: "title is required." });
-		}
-		if (!body.department?.trim() || !body.departmentLabel?.trim()) {
-			return reply.code(400).send({ error: "department is required." });
-		}
-
-		const validLevels = new Set([
-			"foundation",
-			"undergraduate-l1",
-			"undergraduate-l2",
-			"undergraduate-l3",
-			"postgraduate",
-			"professional",
-		]);
-		const level = body.level?.trim();
-		if (!level || !validLevels.has(level)) {
-			return reply.code(400).send({ error: "Invalid teaching level." });
-		}
-
-		const validModes = new Set(["outline", "session", "activities", "rubric"]);
-		const modeRaw = body.mode?.trim() || "outline";
-		if (!validModes.has(modeRaw)) {
-			return reply.code(400).send({ error: "Invalid output mode." });
-		}
-		const mode = modeRaw as "outline" | "session" | "activities" | "rubric";
-
-		const sessionCount =
-			typeof body.sessionCount === "number" && Number.isFinite(body.sessionCount)
-				? Math.min(24, Math.max(4, Math.round(body.sessionCount)))
-				: undefined;
-
-		try {
-			const result = await generateCourseOutline({
-				title: body.title.trim(),
-				departmentLabel: body.departmentLabel.trim(),
-				level: level as "foundation" | "undergraduate-l1" | "undergraduate-l2" | "undergraduate-l3" | "postgraduate" | "professional",
-				mode,
-				standards: body.standards?.trim() || undefined,
-				sourceMaterial: body.sourceMaterial?.trim() || undefined,
-				sessionCount,
-			});
-			return { outline: result.outline, plan: result.outline, mode };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(502).send({ error: message });
-		}
-	});
-
-	app.post("/api/lesson-planner/presentation", async (request, reply) => {
-		const body = request.body as {
-			title?: string;
-			department?: string;
-			departmentLabel?: string;
-			level?: string;
-			outline?: string;
-		};
-
-		if (!body.title?.trim()) {
-			return reply.code(400).send({ error: "title is required." });
-		}
-		if (!body.department?.trim() || !body.departmentLabel?.trim()) {
-			return reply.code(400).send({ error: "department is required." });
-		}
-		if (!body.outline?.trim()) {
-			return reply.code(400).send({ error: "outline is required." });
-		}
-
-		const validLevels = new Set([
-			"foundation",
-			"undergraduate-l1",
-			"undergraduate-l2",
-			"undergraduate-l3",
-			"postgraduate",
-			"professional",
-		]);
-		const level = body.level?.trim();
-		if (!level || !validLevels.has(level)) {
-			return reply.code(400).send({ error: "Invalid teaching level." });
-		}
-
-		try {
-			const presentation = await generateCoursePresentation({
-				title: body.title.trim(),
-				departmentLabel: body.departmentLabel.trim(),
-				level: level as "foundation" | "undergraduate-l1" | "undergraduate-l2" | "undergraduate-l3" | "postgraduate" | "professional",
-				outline: body.outline.trim(),
-			});
-			return { presentation };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(502).send({ error: message });
-		}
-	});
-
-	app.get("/api/lesson-planner/saved", async (request) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		const plans = await listSavedCoursePlans(userId);
-		return { plans };
-	});
-
-	app.get<{ Params: { id: string } }>("/api/lesson-planner/saved/:id", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		const plan = await getSavedCoursePlan(request.params.id, userId);
-		if (!plan) {
-			return reply.code(404).send({ error: "Saved course plan not found." });
-		}
-		return { plan };
-	});
-
-	app.post("/api/lesson-planner/saved", async (request, reply) => {
-		const body = request.body as {
-			id?: string;
-			title?: string;
-			department?: string;
-			level?: string;
-			outline?: string;
-			presentation?: unknown;
-		};
-
-		if (!body.title?.trim() || !body.department?.trim() || !body.level?.trim() || !body.outline?.trim()) {
-			return reply.code(400).send({ error: "Title, department, level, and outline are required." });
-		}
-
-		try {
-			const userId = await resolveUserId(request.headers.authorization);
-			const plan = await saveCoursePlan({
-				userId,
-				id: body.id?.trim() || null,
-				title: body.title.trim(),
-				department: body.department.trim(),
-				level: body.level.trim(),
-				outline: body.outline.trim(),
-				presentation: body.presentation ?? null,
-			});
-			return { plan };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const status = message.includes("permission") || message.includes("Sign in") ? 403 : 502;
-			return reply.code(status).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/lesson-planner/saved/:id", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		const deleted = await deleteSavedCoursePlan(request.params.id, userId);
-		if (!deleted) {
-			const status = userId ? 404 : 403;
-			return reply.code(status).send({
-				error:
-					status === 403
-						? "Sign in to remove course plans saved to your account."
-						: "Saved course plan not found.",
-			});
-		}
-		return { ok: true };
-	});
-
 	app.get("/api/status", async () => chat.getStatus());
 
 	app.get("/api/outputs", async () => {
@@ -927,7 +750,18 @@ export async function startServer(port: number): Promise<void> {
 		if (!userId) {
 			return reply.code(401).send({ error: "Authentication required." });
 		}
-		const body = request.body as { prompt?: string; topic?: string };
+		const body = request.body as {
+			prompt?: string;
+			topic?: string;
+			figureDocumentIds?: string[];
+			sources?: {
+				documentIds?: string[];
+				datasetIds?: string[];
+				questionnaireIds?: string[];
+				noteIds?: string[];
+				projectIds?: string[];
+			};
+		};
 		if (!body.prompt?.trim()) {
 			return reply.code(400).send({ error: "Prompt is required." });
 		}
@@ -937,6 +771,8 @@ export async function startServer(port: number): Promise<void> {
 				userId,
 				prompt: body.prompt,
 				topic: body.topic,
+				figureDocumentIds: body.figureDocumentIds,
+				sources: body.sources,
 			});
 			return { job };
 		} catch (error) {
@@ -1021,6 +857,7 @@ export async function startServer(port: number): Promise<void> {
 			sources?: {
 				documentIds?: string[];
 				datasetIds?: string[];
+				questionnaireIds?: string[];
 				noteIds?: string[];
 				projectIds?: string[];
 			};
@@ -1208,9 +1045,8 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(400).send({ error: "discipline, topic, and ideas are required." });
 		}
 
-		const validScopes = new Set(["undergraduate", "masters", "doctoral", "faculty"]);
-		const scope = body.scope?.trim();
-		if (!scope || !validScopes.has(scope)) {
+		const scope = normalizeResearchScope(body.scope?.trim());
+		if (!scope) {
 			return reply.code(400).send({ error: "Valid scope is required." });
 		}
 
@@ -1241,7 +1077,7 @@ export async function startServer(port: number): Promise<void> {
 			const session = await saveResearchIdeaSession(userId, {
 				discipline: body.discipline,
 				topic: body.topic,
-				scope: scope as "undergraduate" | "masters" | "doctoral" | "faculty",
+				scope: scope,
 				ideas,
 			});
 			return { session };
@@ -1279,16 +1115,14 @@ export async function startServer(port: number): Promise<void> {
 			outline?: string;
 		};
 
-		const validScopes = new Set(["undergraduate", "masters", "doctoral", "faculty"]);
-		const scope = body.scope?.trim();
+		const scope = normalizeResearchScope(body.scope?.trim());
 		if (
 			!body.ideaId?.trim() ||
 			!body.ideaTitle?.trim() ||
 			!body.discipline?.trim() ||
 			!body.topic?.trim() ||
 			!body.outline?.trim() ||
-			!scope ||
-			!validScopes.has(scope)
+			!scope
 		) {
 			return reply.code(400).send({
 				error: "ideaId, ideaTitle, discipline, topic, scope, and outline are required.",
@@ -1301,7 +1135,7 @@ export async function startServer(port: number): Promise<void> {
 				ideaTitle: body.ideaTitle.trim(),
 				discipline: body.discipline.trim(),
 				topic: body.topic.trim(),
-				scope: scope as "undergraduate" | "masters" | "doctoral" | "faculty",
+				scope: scope,
 				outline: body.outline.trim(),
 			});
 			return { outline };
@@ -1371,6 +1205,8 @@ export async function startServer(port: number): Promise<void> {
 			favorite?: boolean;
 			projectType?: string;
 			sections?: Array<{ id: string; title?: string; content?: string }>;
+			notebookData?: unknown;
+			progress?: number;
 		};
 		try {
 			const project = await updateProject(userId, request.params.projectId, body);
@@ -1395,37 +1231,6 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(status).send({ error: message });
 		}
 	});
-
-	app.get<{ Params: { projectId: string } }>(
-		"/api/research/projects/:projectId/notebook",
-		async (request, reply) => {
-			const userId = await resolveUserId(request.headers.authorization);
-			if (!userId) return reply.code(401).send({ error: "Authentication required." });
-			try {
-				return await getNotebookData(userId, request.params.projectId);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				const status = message.includes("not found") ? 404 : 400;
-				return reply.code(status).send({ error: message });
-			}
-		},
-	);
-
-	app.put<{ Params: { projectId: string } }>(
-		"/api/research/projects/:projectId/notebook",
-		async (request, reply) => {
-			const userId = await resolveUserId(request.headers.authorization);
-			if (!userId) return reply.code(401).send({ error: "Authentication required." });
-			const body = request.body as { notebookData?: unknown };
-			try {
-				return await saveNotebookData(userId, request.params.projectId, body.notebookData ?? null);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				const status = message.includes("not found") ? 404 : 400;
-				return reply.code(status).send({ error: message });
-			}
-		},
-	);
 
 	app.get<{ Params: { projectId: string } }>(
 		"/api/research/projects/:projectId/workspace",
@@ -1554,64 +1359,6 @@ export async function startServer(port: number): Promise<void> {
 		return { ok: true };
 	});
 
-	app.get("/api/research/notes", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		if (!userId) return reply.code(401).send({ error: "Authentication required." });
-		const projectId = (request.query as { projectId?: string }).projectId;
-		const notes = await listNotes(userId, projectId);
-		return { notes };
-	});
-
-	app.post("/api/research/notes", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		if (!userId) return reply.code(401).send({ error: "Authentication required." });
-		const body = request.body as { projectId?: string; title?: string; content?: string };
-		try {
-			const note = await createNote(userId, body);
-			return { note };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.patch<{ Params: { id: string } }>("/api/research/notes/:id", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		if (!userId) return reply.code(401).send({ error: "Authentication required." });
-		const body = request.body as { title?: string; content?: string };
-		try {
-			const note = await updateNote(request.params.id, userId, body);
-			if (!note) return reply.code(404).send({ error: "Note not found." });
-			return { note };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/research/notes/:id", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		if (!userId) return reply.code(401).send({ error: "Authentication required." });
-		const deleted = await deleteNote(request.params.id, userId);
-		if (!deleted) return reply.code(404).send({ error: "Note not found." });
-		return { ok: true };
-	});
-
-	/** Research Note AI — project OpenRouter via llm.service (no BYO keys). */
-	app.post("/api/research-note/ai/generate", async (request, reply) => {
-		const userId = await resolveUserId(request.headers.authorization);
-		if (!userId) return reply.code(401).send({ error: "Authentication required." });
-
-		const webRequest = new Request("http://localhost/api/research-note/ai/generate", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(request.body ?? {}),
-		});
-		const response = await handleResearchNoteGenerate(webRequest);
-		const payload = await response.json();
-		return reply.code(response.status).send(payload);
-	});
-
 	app.get("/api/research/references", async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
 		if (!userId) return reply.code(401).send({ error: "Authentication required." });
@@ -1677,7 +1424,7 @@ export async function startServer(port: number): Promise<void> {
 			const dataset = await createDataset(userId, body);
 			return { dataset };
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = datasetErrorMessage(error);
 			const status = message.includes("Sign in") ? 401 : 400;
 			return reply.code(status).send({ error: message });
 		}
@@ -1707,7 +1454,7 @@ export async function startServer(port: number): Promise<void> {
 			const session = await beginDatasetDirectUpload(userId, body);
 			return session;
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = datasetErrorMessage(error);
 			const status = message.includes("Sign in") ? 401 : 400;
 			return reply.code(status).send({ error: message });
 		}
@@ -1782,6 +1529,7 @@ export async function startServer(port: number): Promise<void> {
 		const body = (request.body ?? {}) as {
 			datasetIds?: string[];
 			projectIds?: string[];
+			documentIds?: string[];
 			topic?: string;
 		};
 		try {
@@ -1790,6 +1538,7 @@ export async function startServer(port: number): Promise<void> {
 				artifacts: artifacts.artifacts,
 				figureAppendix: artifacts.figureAppendix,
 				hasSavedFigures: artifacts.hasSavedFigures,
+				figureDocumentIds: artifacts.figureDocumentIds,
 			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1803,6 +1552,94 @@ export async function startServer(port: number): Promise<void> {
 		if (!userId) return reply.code(401).send({ error: "Authentication required." });
 		const deleted = await deleteDataset(request.params.id, userId);
 		if (!deleted) return reply.code(404).send({ error: "Dataset not found." });
+		return { ok: true };
+	});
+
+	app.get("/api/research/questionnaires", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) return reply.code(401).send({ error: "Authentication required." });
+		const projectId = (request.query as { projectId?: string }).projectId;
+		const questionnaires = await listQuestionnaires(userId, projectId);
+		return { questionnaires };
+	});
+
+	app.post("/api/research/questionnaires", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) return reply.code(401).send({ error: "Authentication required." });
+		const body = request.body as {
+			projectId?: string;
+			title?: string;
+			description?: string;
+			population?: string;
+			sampleSize?: number;
+			distributionNote?: string;
+			items?: unknown;
+			instrumentDocumentId?: string;
+		};
+		try {
+			const questionnaire = await createQuestionnaire(userId, body);
+			return { questionnaire };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const status = message.includes("Sign in") ? 401 : 400;
+			return reply.code(status).send({ error: message });
+		}
+	});
+
+	app.patch<{ Params: { id: string } }>("/api/research/questionnaires/:id", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) return reply.code(401).send({ error: "Authentication required." });
+		const body = (request.body ?? {}) as {
+			title?: string;
+			description?: string;
+			population?: string;
+			sampleSize?: number;
+			distributionNote?: string;
+			items?: unknown;
+			instrumentDocumentId?: string | null;
+		};
+		try {
+			const questionnaire = await updateQuestionnaire(request.params.id, userId, body);
+			if (!questionnaire) return reply.code(404).send({ error: "Questionnaire not found." });
+			return { questionnaire };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const status = message.includes("Sign in") ? 401 : 400;
+			return reply.code(status).send({ error: message });
+		}
+	});
+
+	app.post<{ Params: { id: string } }>(
+		"/api/research/questionnaires/:id/import",
+		async (request, reply) => {
+			const userId = await resolveUserId(request.headers.authorization);
+			if (!userId) return reply.code(401).send({ error: "Authentication required." });
+			const body = (request.body ?? {}) as {
+				fileName?: string;
+				fileMime?: string;
+				fileData?: string;
+				columnMap?: Record<string, string>;
+			};
+			try {
+				const questionnaire = await importQuestionnaireResponses(request.params.id, userId, body);
+				return { questionnaire };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const status = message.includes("Sign in")
+					? 401
+					: message.includes("not found")
+						? 404
+						: 400;
+				return reply.code(status).send({ error: message });
+			}
+		},
+	);
+
+	app.delete<{ Params: { id: string } }>("/api/research/questionnaires/:id", async (request, reply) => {
+		const userId = await resolveUserId(request.headers.authorization);
+		if (!userId) return reply.code(401).send({ error: "Authentication required." });
+		const deleted = await deleteQuestionnaire(request.params.id, userId);
+		if (!deleted) return reply.code(404).send({ error: "Questionnaire not found." });
 		return { ok: true };
 	});
 
@@ -1986,6 +1823,21 @@ export async function startServer(port: number): Promise<void> {
 			const user = await getAdminUserById(request.params.id, scope);
 			if (!user) return reply.code(404).send({ error: "User not found." });
 			return { user };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get<{ Params: { id: string } }>("/api/admin/users/:id/governance-history", async (request, reply) => {
+		try {
+			const scope = await requireAdminScope(request.headers.authorization);
+			const data = await getUserGovernanceHistory(request.params.id, scope);
+			if (!data) return reply.code(404).send({ error: "User not found." });
+			return data;
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
 				return reply.code(error.statusCode).send({ error: error.message });
@@ -2400,36 +2252,6 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(500).send({ error: message });
 		}
 	});
-
-	app.get("/api/admin/lectures", async (request, reply) => {
-		try {
-			await requireAdmin(request.headers.authorization);
-			const [lectures, stats] = await Promise.all([listAllLectures(), getLectureAdminStats()]);
-			return { lectures, stats };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/admin/lectures/:id", async (request, reply) => {
-		try {
-			await requireAdmin(request.headers.authorization);
-			const deleted = await adminDeleteLecture(request.params.id);
-			if (!deleted) return reply.code(404).send({ error: "Lecture not found." });
-			return { ok: true };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
 	app.get("/api/admin/tokens", async (request, reply) => {
 		try {
 			const scope = await requireAdminScope(request.headers.authorization);
@@ -2564,70 +2386,6 @@ export async function startServer(port: number): Promise<void> {
 			const body = request.body as { ids?: string[] };
 			if (!body.ids?.length) return reply.code(400).send({ error: "ids are required." });
 			const deleted = await bulkDeleteAdminResearchPapers(body.ids, adminId);
-			return { deleted };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.get("/api/admin/research/notebooks", async (request, reply) => {
-		try {
-			await requireSuperAdmin(request.headers.authorization);
-			const query = request.query as { universityId?: string; limit?: string };
-			const notebooks = await listAdminResearchNotebooks({
-				universityId: query.universityId || null,
-				limit: query.limit ? Number(query.limit) : undefined,
-			});
-			return { notebooks };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.get<{ Params: { id: string } }>("/api/admin/research/notebooks/:id", async (request, reply) => {
-		try {
-			await requireSuperAdmin(request.headers.authorization);
-			const notebook = await getAdminResearchNotebook(request.params.id);
-			if (!notebook) return reply.code(404).send({ error: "Research notebook not found." });
-			return { notebook };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/admin/research/notebooks/:id", async (request, reply) => {
-		try {
-			const adminId = await requireSuperAdmin(request.headers.authorization);
-			const ok = await deleteAdminResearchNotebook(request.params.id, adminId);
-			if (!ok) return reply.code(404).send({ error: "Research notebook not found." });
-			return { ok: true };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.post("/api/admin/research/notebooks/bulk-delete", async (request, reply) => {
-		try {
-			const adminId = await requireSuperAdmin(request.headers.authorization);
-			const body = request.body as { ids?: string[] };
-			if (!body.ids?.length) return reply.code(400).send({ error: "ids are required." });
-			const deleted = await bulkDeleteAdminResearchNotebooks(body.ids, adminId);
 			return { deleted };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
@@ -2932,7 +2690,7 @@ export async function startServer(port: number): Promise<void> {
 				target: body.target,
 				role: body.role,
 				faculty: body.faculty,
-			}, scope);
+			}, scope, scope.actorId);
 			return { result };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
@@ -3043,93 +2801,6 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.get<{ Querystring: { status?: string; kind?: string; limit?: string } }>(
-		"/api/admin/approvals",
-		async (request, reply) => {
-			try {
-				const scope = await requireAdminScope(request.headers.authorization);
-				const limit = Number.parseInt(request.query.limit ?? "100", 10);
-				const [approvals, stats] = await Promise.all([
-					listApprovals({
-						status: request.query.status,
-						kind: request.query.kind,
-						limit: Number.isFinite(limit) ? limit : 100,
-					}, scope),
-					getApprovalStats(scope),
-				]);
-				return { approvals, stats };
-			} catch (error) {
-				if (error instanceof AdminRequiredError) {
-					return reply.code(error.statusCode).send({ error: error.message });
-				}
-				const message = error instanceof Error ? error.message : String(error);
-				return reply.code(500).send({ error: message });
-			}
-		},
-	);
-
-	app.post("/api/admin/approvals", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as {
-				title?: string;
-				description?: string;
-				kind?: "tool" | "dataset" | "use_case" | "model" | "integration";
-				justification?: string;
-				riskNotes?: string;
-				requesterId?: string;
-			};
-			if (!body.title?.trim() || !body.kind) {
-				return reply.code(400).send({ error: "title and kind are required." });
-			}
-			const approval = await createApproval(
-				{
-					title: body.title,
-					description: body.description,
-					kind: body.kind,
-					justification: body.justification,
-					riskNotes: body.riskNotes,
-					requesterId: body.requesterId || scope.actorId,
-				},
-				scope.actorId,
-				scope,
-			);
-			return { approval };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.patch<{ Params: { id: string } }>("/api/admin/approvals/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as {
-				status?: "under_review" | "approved" | "rejected" | "withdrawn";
-				reviewNotes?: string;
-			};
-			if (!body.status) {
-				return reply.code(400).send({ error: "status is required." });
-			}
-			const approval = await reviewApproval(
-				request.params.id,
-				{ status: body.status, reviewNotes: body.reviewNotes },
-				scope.actorId,
-				scope,
-			);
-			if (!approval) return reply.code(404).send({ error: "Approval not found." });
-			return { approval };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
 
 	app.get("/api/admin/reports", async (request, reply) => {
 		try {
@@ -3163,7 +2834,7 @@ export async function startServer(port: number): Promise<void> {
 		try {
 			const scope = await requireAdminScope(request.headers.authorization);
 			const body = (request.body ?? {}) as {
-				audience?: "management" | "senate" | "both";
+				audience?: "management" | "senate" | "both" | "external_auditors";
 				periodStart?: string;
 				periodEnd?: string;
 				reportType?: string;
@@ -3187,233 +2858,6 @@ export async function startServer(port: number): Promise<void> {
 				scope,
 			});
 			return { report };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	/* ── Risk, compliance, incidents, AI inventory ───────────────────── */
-
-	app.get<{ Querystring: { status?: string; category?: string } }>("/api/admin/risks", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const [risks, stats] = await Promise.all([
-				listRisks({ status: request.query.status, category: request.query.category }, scope),
-				getRiskStats(scope),
-			]);
-			return { risks, stats };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.post("/api/admin/risks", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as {
-				title?: string;
-				description?: string;
-				category?: string;
-				status?: string;
-				likelihood?: number;
-				impact?: number;
-				residualLikelihood?: number;
-				residualImpact?: number;
-				faculty?: string;
-				department?: string;
-				ownerName?: string;
-				controls?: string;
-				treatmentPlan?: string;
-			};
-			if (!body.title?.trim() || !body.category || body.likelihood == null || body.impact == null) {
-				return reply.code(400).send({ error: "title, category, likelihood, and impact are required." });
-			}
-			const risk = await createRisk(
-				{
-					title: body.title,
-					description: body.description,
-					category: body.category as
-						| "data_protection"
-						| "academic_integrity"
-						| "model_safety"
-						| "access_control"
-						| "third_party"
-						| "operational"
-						| "legal"
-						| "reputational",
-					status: body.status as "open" | "mitigating" | "accepted" | "closed" | undefined,
-					likelihood: body.likelihood,
-					impact: body.impact,
-					residualLikelihood: body.residualLikelihood,
-					residualImpact: body.residualImpact,
-					faculty: body.faculty,
-					department: body.department,
-					ownerName: body.ownerName,
-					controls: body.controls,
-					treatmentPlan: body.treatmentPlan,
-				},
-				scope.actorId,
-				scope,
-			);
-			return { risk };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.patch<{ Params: { id: string } }>("/api/admin/risks/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as Record<string, unknown>;
-			const risk = await updateRisk(request.params.id, body as never, scope.actorId, scope);
-			if (!risk) return reply.code(404).send({ error: "Risk not found." });
-			return { risk };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/admin/risks/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const deleted = await deleteRisk(request.params.id, scope.actorId, scope);
-			if (!deleted) return reply.code(404).send({ error: "Risk not found." });
-			return { ok: true };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
-
-	app.get<{ Querystring: { framework?: string; status?: string } }>(
-		"/api/admin/compliance",
-		async (request, reply) => {
-			try {
-				const scope = await requireAdminScope(request.headers.authorization);
-				const [controls, stats] = await Promise.all([
-					listComplianceControls({
-						framework: request.query.framework,
-						status: request.query.status,
-					}, scope),
-					getComplianceStats(scope),
-				]);
-				return { controls, stats };
-			} catch (error) {
-				if (error instanceof AdminRequiredError) {
-					return reply.code(error.statusCode).send({ error: error.message });
-				}
-				const message = error instanceof Error ? error.message : String(error);
-				return reply.code(500).send({ error: message });
-			}
-		},
-	);
-
-	app.post("/api/admin/compliance", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as {
-				code?: string;
-				title?: string;
-				description?: string;
-				framework?: string;
-				domain?: string;
-				priority?: string;
-				status?: "not_started" | "in_progress" | "compliant" | "gap" | "not_applicable";
-				ownerName?: string;
-				evidence?: string;
-				notes?: string;
-			};
-			if (!body.code?.trim() || !body.title?.trim() || !body.framework || !body.domain) {
-				return reply.code(400).send({ error: "code, title, framework, and domain are required." });
-			}
-			const control = await createComplianceControl(
-				{
-					code: body.code,
-					title: body.title,
-					description: body.description,
-					framework: body.framework as
-						| "nigeria_ai_act"
-						| "eu_ai_act"
-						| "ndpr"
-						| "institutional"
-						| "iso_42001"
-						| "unesco",
-					domain: body.domain as
-						| "transparency"
-						| "human_oversight"
-						| "data_governance"
-						| "accuracy_robustness"
-						| "privacy"
-						| "accountability"
-						| "fairness"
-						| "security",
-					priority: body.priority,
-					status: body.status,
-					ownerName: body.ownerName,
-					evidence: body.evidence,
-					notes: body.notes,
-				},
-				scope.actorId,
-				scope,
-			);
-			return { control };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.patch<{ Params: { id: string } }>("/api/admin/compliance/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as Partial<{
-				status: "not_started" | "in_progress" | "compliant" | "gap" | "not_applicable";
-				evidence: string;
-				ownerName: string;
-				priority: string;
-				notes: string;
-				nextReviewAt: string | null;
-			}>;
-			const control = await updateComplianceControl(request.params.id, body, scope.actorId, scope);
-			if (!control) return reply.code(404).send({ error: "Control not found." });
-			return { control };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/admin/compliance/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const deleted = await deleteComplianceControl(request.params.id, scope.actorId, scope);
-			if (!deleted) return reply.code(404).send({ error: "Control not found." });
-			return { ok: true };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
 				return reply.code(error.statusCode).send({ error: error.message });
@@ -3951,77 +3395,8 @@ export async function startServer(port: number): Promise<void> {
 		},
 	);
 
-	app.get<{ Querystring: { status?: string; riskTier?: string } }>(
-		"/api/admin/inventory",
-		async (request, reply) => {
-			try {
-				const scope = await requireAdminScope(request.headers.authorization);
-				const [systems, stats] = await Promise.all([
-					listAiSystems({
-						status: request.query.status,
-						riskTier: request.query.riskTier,
-					}, scope),
-					getAiSystemStats(scope),
-				]);
-				return { systems, stats };
-			} catch (error) {
-				if (error instanceof AdminRequiredError) {
-					return reply.code(error.statusCode).send({ error: error.message });
-				}
-				const message = error instanceof Error ? error.message : String(error);
-				return reply.code(500).send({ error: message });
-			}
-		},
-	);
 
-	app.post("/api/admin/inventory", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as Record<string, unknown>;
-			if (!body.name || typeof body.name !== "string" || !body.name.trim()) {
-				return reply.code(400).send({ error: "name is required." });
-			}
-			const system = await createAiSystem(body as never, scope.actorId, scope);
-			return { system };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.patch<{ Params: { id: string } }>("/api/admin/inventory/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const body = request.body as Record<string, unknown>;
-			const system = await updateAiSystem(request.params.id, body as never, scope.actorId, scope);
-			if (!system) return reply.code(404).send({ error: "System not found." });
-			return { system };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
-
-	app.delete<{ Params: { id: string } }>("/api/admin/inventory/:id", async (request, reply) => {
-		try {
-			const scope = await requireAdminScope(request.headers.authorization);
-			const deleted = await deleteAiSystem(request.params.id, scope.actorId, scope);
-			if (!deleted) return reply.code(404).send({ error: "System not found." });
-			return { ok: true };
-		} catch (error) {
-			if (error instanceof AdminRequiredError) {
-				return reply.code(error.statusCode).send({ error: error.message });
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
-		}
-	});
+	await registerPortalRoutes(app);
 
 	app.register(async (scoped) => {
 		scoped.get("/ws", { websocket: true }, (socket, request) => {

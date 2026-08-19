@@ -27,7 +27,6 @@ const MOCK_SYSTEM_NAMES = [
 	"Research paper drafting (OpenRouter)",
 	"Research ideas generator",
 	"Literature search (AlphaXiv / arXiv / Tavily)",
-	"Research Note AI drafting",
 ];
 
 /** Remove seeded demo rows that were never owned/updated by an admin actor. */

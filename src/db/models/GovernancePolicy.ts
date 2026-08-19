@@ -10,7 +10,7 @@ const governancePolicySchema = new Schema(
 			enum: ["feature", "dataset", "tool", "use_case", "content"],
 			required: true,
 		},
-		/** Target identifier e.g. research-ideas, research-note-ai, personal-data */
+		/** Target identifier e.g. research-ideas, research-paper-ai, personal-data */
 		target: { type: String, required: true, trim: true },
 		effect: {
 			type: String,

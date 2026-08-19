@@ -312,6 +312,27 @@ export async function listAuditLogs(
 	return rows.map(toRecord);
 }
 
+export async function listUserGovernanceHistory(
+	user: { id: string; email?: string | null },
+	scope?: AdminScope,
+	limit = 80,
+): Promise<AuditLogRecord[]> {
+	const or: Record<string, unknown>[] = [{ targetId: user.id }];
+	if (Types.ObjectId.isValid(user.id)) {
+		or.push({ actorId: new Types.ObjectId(user.id) });
+	}
+	if (user.email) or.push({ actorEmail: user.email });
+	const filter: Record<string, unknown> = {
+		...scopeFilter(scope),
+		$or: or,
+	};
+	const rows = await AuditLogModel.find(filter)
+		.sort({ createdAt: -1 })
+		.limit(Math.min(Math.max(limit, 1), 200))
+		.lean();
+	return rows.map(toRecord);
+}
+
 export async function getAuditAlertStats(scope?: AdminScope) {
 	const sf = scopeFilter(scope);
 	const [total, flagged, critical, high, last24h] = await Promise.all([

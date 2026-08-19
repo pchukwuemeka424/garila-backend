@@ -12,6 +12,7 @@ import {
 	headObject,
 	putObject,
 	s3Enabled,
+	s3ErrorMessage,
 } from "./s3.service.js";
 
 /** Soft limit on base64/data-URL payloads when files go to MinIO (~15 MB decoded). */
@@ -114,21 +115,37 @@ export async function storeAttachment(input: {
 			id,
 			fileName: input.fileName,
 		});
-		await putObject({
-			key: storageKey,
-			body: decoded.buffer,
-			contentType: mime,
-			metadata: {
-				userid: input.userId.slice(0, 64),
-				kind: input.kind,
-			},
-		});
-		return {
-			storageKey,
-			fileData: "",
-			mime,
-			byteLength: decoded.buffer.byteLength,
-		};
+		try {
+			await putObject({
+				key: storageKey,
+				body: decoded.buffer,
+				contentType: mime,
+				metadata: {
+					userid: input.userId.slice(0, 64),
+					kind: input.kind,
+				},
+			});
+			return {
+				storageKey,
+				fileData: "",
+				mime,
+				byteLength: decoded.buffer.byteLength,
+			};
+		} catch (error) {
+			if (payload.length <= MAX_MONGO_ATTACHMENT_CHARS) {
+				console.warn(
+					"[attachment-storage] MinIO upload failed; saving file in the database instead.",
+					s3ErrorMessage(error),
+				);
+				return {
+					storageKey: "",
+					fileData: payload,
+					mime,
+					byteLength: decoded.buffer.byteLength,
+				};
+			}
+			throw new Error(s3ErrorMessage(error));
+		}
 	}
 
 	return {

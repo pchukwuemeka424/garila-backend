@@ -1,5 +1,12 @@
 import { getOpenRouterFastModel } from "../config/env.js";
 import type { TokenUsage } from "../types/token-usage.js";
+import {
+	dropOffTopicPapers,
+	fetchPapersForQuery,
+	formatPapersForContext,
+	isHealthResearchTopic,
+} from "./alphaxiv.service.js";
+import { rerankPapers } from "./huggingface.service.js";
 import { completeOpenRouterChat } from "./llm.service.js";
 import type { ResearchScope } from "./outline.service.js";
 
@@ -8,6 +15,7 @@ export type GenerateResearchIdeasInput = {
 	topic: string;
 	scope: ResearchScope;
 	sourceContext?: string;
+	literatureBank?: string;
 };
 
 export type ResearchScopeAnalysis = {
@@ -37,10 +45,15 @@ export type GenerateResearchIdeasResult = {
 };
 
 const SCOPE_LABELS: Record<ResearchScope, string> = {
-	undergraduate: "Undergraduate",
-	masters: "Master's thesis",
-	doctoral: "Doctoral research",
+	assignment: "Assignment",
+	conference: "Conference paper",
+	dissertation: "Dissertation",
 	faculty: "Faculty / grant",
+	journal: "Journal/Research Paper",
+	proposal: "Research proposal",
+	report: "Project report",
+	thesis: "Thesis",
+	undergraduate_project: "Undergraduate project",
 };
 
 const VAGUE_TITLE_EXAMPLES = [
@@ -129,7 +142,8 @@ async function runScopeAndContextAnalyst(
 				content: `Analyse this ${scopeLabel}-level interest in ${input.disciplineLabel}.
 
 Interest statement: "${input.topic.trim()}"
-${input.sourceContext ? `\nSelected research note / source material:\n${input.sourceContext}\n\nIMPORTANT: Prefer the research note's suggested interest topic, title, and focus when present. Use its notebook content, data, findings, and figures to identify variables, context, evidence, and research gaps. Align analysis with that note rather than inventing an unrelated topic.` : ""}
+${input.literatureBank ? `\nRetrieved research API literature (ground gaps in these papers; do not invent authors or findings):\n${input.literatureBank}\n` : ""}
+${input.sourceContext ? `\nSelected source material:\n${input.sourceContext}\n\nIMPORTANT: If this is a research notebook library, use the whole folder (notebook pages, lab log, documents, datasets, surveys, response files, figure metadata/captions, references). Prefer its suggested interest topic, title, and focus. Use its content, data, findings, and notebook evidence to identify variables, context, evidence, and research gaps. Treat figures/images as metadata-only context, not raw image understanding. Align analysis with that material rather than inventing an unrelated topic, and do not contradict it.` : ""}
 
 Return JSON:
 {
@@ -179,6 +193,7 @@ ${TITLE_QUALITY_RULES}
 
 Scholar profile:
 - Level: ${scopeLabel}
+- Deliverable: match titles and RQs to a ${scopeLabel} (not a generic journal article unless the scope is Journal/Research Paper). Match ambition, novelty, and feasibility to that deliverable type.
 - Discipline: ${scopeAnalysis.discipline}
 - Research area: ${scopeAnalysis.researchArea}
 - Variables: ${scopeAnalysis.variables.join("; ") || "derive from analysis"}
@@ -189,7 +204,8 @@ Scholar profile:
 - Domain: ${contextAnalysis.domain}
 - Research gap: ${contextAnalysis.researchGap}
 - Original interest: "${input.topic.trim()}"
-${input.sourceContext ? `\nUser-selected research note / source material:\n${input.sourceContext}\n\nGround every title, rationale, approach, outline, and research question in this material. If the note includes a suggested interest topic or study title, refine that into publishable academic titles (do not ignore it for an unrelated theme). Use the note's data, findings, and methods where relevant. Do not claim that a source says something it does not say.` : ""}
+${input.literatureBank ? `\nRetrieved research API literature:\n${input.literatureBank}\n\nGround titles, gaps, and rationales in these papers. Copy USE THIS CITE strings if you mention a source. Do not invent papers.\n` : ""}
+${input.sourceContext ? `\nUser-selected source material:\n${input.sourceContext}\n\nIf this is a research notebook library, use the whole folder. Ground every title, rationale, approach, outline, and research question in this material. If it includes a suggested interest topic or study title, refine that into publishable academic titles (do not ignore it for an unrelated theme). Use its data, findings, lab notes, notebook pages, methods, surveys, and response files where relevant. Treat figures/images as metadata-only context, not raw image understanding. Do not contradict the notebook material or claim that a source says something it does not say.` : ""}
 
 For each idea use this exact markdown structure:
 
@@ -246,9 +262,26 @@ export async function generateResearchIdeas(
 	input: GenerateResearchIdeasInput,
 	options?: { signal?: AbortSignal },
 ): Promise<GenerateResearchIdeasResult> {
-	const { scope, contextAndGap, usage: u1 } = await runScopeAndContextAnalyst(input, options);
+	const searchQuery = [input.topic.trim(), input.disciplineLabel].filter(Boolean).join(" ");
+	let literatureBank = input.literatureBank?.trim() ?? "";
+	if (!literatureBank) {
+		const preferHealth =
+			isHealthResearchTopic(searchQuery) || isHealthResearchTopic(input.disciplineLabel);
+		const fetched = await fetchPapersForQuery(searchQuery, {
+			limit: 8,
+			signal: options?.signal,
+			preferHealth,
+		});
+		const ranked = dropOffTopicPapers(
+			await rerankPapers(input.topic, fetched, { signal: options?.signal }),
+			preferHealth,
+		);
+		literatureBank = formatPapersForContext(ranked, input.topic, "Research APIs", 8);
+	}
+	const grounded: GenerateResearchIdeasInput = { ...input, literatureBank };
+	const { scope, contextAndGap, usage: u1 } = await runScopeAndContextAnalyst(grounded, options);
 	const { markdown: finalMarkdown, usage: u2 } = await runTitleFormulator(
-		input,
+		grounded,
 		scope,
 		contextAndGap,
 		options,

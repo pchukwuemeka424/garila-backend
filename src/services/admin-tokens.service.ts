@@ -24,6 +24,14 @@ export type AdminTokenRecord = {
 	tokenQuota: StudentTokenQuota | null;
 };
 
+export type TokenOrgBreakdown = {
+	key: string;
+	label: string;
+	users: number;
+	tokensUsed: number;
+	allowance: number;
+};
+
 export type TokenAdminStats = {
 	userCount: number;
 	studentsWithQuota: number;
@@ -33,6 +41,9 @@ export type TokenAdminStats = {
 	weeklyTokensApprox: number;
 	monthlyTokensApprox: number;
 	estimatedCost: number;
+	byFaculty: TokenOrgBreakdown[];
+	byDepartment: TokenOrgBreakdown[];
+	byProgramme: TokenOrgBreakdown[];
 };
 
 const COST_PER_1K = 0.002;
@@ -151,16 +162,40 @@ export async function bulkResetUserTokens(
 
 export async function getTokenAdminStats(scope?: AdminScope): Promise<TokenAdminStats> {
 	const filter = scope ? universityFilterForScope(scope) : {};
-	const users = await UserModel.find(filter).select("role tokensUsed").lean();
+	const users = await UserModel.find(filter)
+		.select("role tokensUsed tokenAllowance faculty department programme universityId")
+		.lean();
+	const defaults = await getUniversityTokenDefaultsMap(users.map((u) => u.universityId));
 	let totalTokensUsed = 0;
 	let studentsWithQuota = 0;
 	let lecturersWithQuota = 0;
+	const facultyMap = new Map<string, TokenOrgBreakdown>();
+	const departmentMap = new Map<string, TokenOrgBreakdown>();
+	const programmeMap = new Map<string, TokenOrgBreakdown>();
+
+	const bump = (map: Map<string, TokenOrgBreakdown>, key: string | null | undefined, used: number, allowance: number) => {
+		const label = key?.trim() || "Unassigned";
+		const current = map.get(label) ?? { key: label, label, users: 0, tokensUsed: 0, allowance: 0 };
+		current.users += 1;
+		current.tokensUsed += used;
+		current.allowance += allowance;
+		map.set(label, current);
+	};
 
 	for (const user of users) {
-		totalTokensUsed += user.tokensUsed ?? 0;
+		const quota = quotaForUser(user, defaults);
+		const used = quota?.used ?? user.tokensUsed ?? 0;
+		const allowance = quota?.allowance ?? 0;
+		totalTokensUsed += used;
 		if (user.role === "student") studentsWithQuota++;
 		if (user.role === "lecturer" || user.role === "researcher") lecturersWithQuota++;
+		bump(facultyMap, user.faculty, used, allowance);
+		bump(departmentMap, user.department, used, allowance);
+		bump(programmeMap, user.programme, used, allowance);
 	}
+
+	const sortRows = (map: Map<string, TokenOrgBreakdown>) =>
+		[...map.values()].sort((a, b) => b.tokensUsed - a.tokensUsed);
 
 	const dailyTokensApprox = Math.round(totalTokensUsed / 30);
 	const weeklyTokensApprox = Math.round(totalTokensUsed / 4.3);
@@ -176,5 +211,8 @@ export async function getTokenAdminStats(scope?: AdminScope): Promise<TokenAdmin
 		weeklyTokensApprox,
 		monthlyTokensApprox,
 		estimatedCost,
+		byFaculty: sortRows(facultyMap),
+		byDepartment: sortRows(departmentMap),
+		byProgramme: sortRows(programmeMap),
 	};
 }

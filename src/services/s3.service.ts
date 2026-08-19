@@ -52,19 +52,49 @@ export type PutObjectInput = {
 	metadata?: Record<string, string>;
 };
 
+export function s3ErrorMessage(error: unknown): string {
+	if (error && typeof error === "object") {
+		const e = error as {
+			name?: string;
+			message?: string;
+			Code?: string;
+			$metadata?: { httpStatusCode?: number };
+		};
+		const status = e.$metadata?.httpStatusCode;
+		const code = e.Code || e.name;
+		const msg = e.message?.trim() ?? "";
+		if (status === 403) {
+			return "Storage denied the upload. Check S3 credentials and bucket policy.";
+		}
+		if (status === 404) {
+			return "Storage bucket not found. Check S3_BUCKET.";
+		}
+		if (msg && msg !== "UnknownError" && msg !== "Unknown") return msg;
+		if (code && code !== "UnknownError") return `Storage error: ${code}`;
+		return status
+			? `Could not upload the file to storage (HTTP ${status}).`
+			: "Could not upload the file to storage. Check S3_ENDPOINT and that MinIO is reachable.";
+	}
+	return "Could not upload the file to storage.";
+}
+
 export async function putObject(input: PutObjectInput): Promise<{ key: string; url: string }> {
 	const { client: s3, config } = getClient();
 	const body =
 		typeof input.body === "string" ? Buffer.from(input.body, "utf8") : input.body;
-	await s3.send(
-		new PutObjectCommand({
-			Bucket: config.bucket,
-			Key: input.key,
-			Body: body,
-			ContentType: input.contentType,
-			Metadata: input.metadata,
-		}),
-	);
+	try {
+		await s3.send(
+			new PutObjectCommand({
+				Bucket: config.bucket,
+				Key: input.key,
+				Body: body,
+				ContentType: input.contentType,
+				Metadata: input.metadata,
+			}),
+		);
+	} catch (error) {
+		throw new Error(s3ErrorMessage(error));
+	}
 	return { key: input.key, url: objectUrl(input.key) };
 }
 

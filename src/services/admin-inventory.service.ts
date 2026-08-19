@@ -166,10 +166,10 @@ export async function syncInventoryFromUsage(): Promise<void> {
 
 	if (projectCount > 0) {
 		await AiSystemInventoryModel.updateOne(
-			{ name: "Research Note workspace", vendor: "OpenRouter", universityId: { $exists: false } },
+			{ name: "Research projects", vendor: "OpenRouter", universityId: { $exists: false } },
 			{
 				$set: {
-					purpose: `Research Note projects in use (${projectCount})`,
+					purpose: `Research projects in use (${projectCount})`,
 					category: "llm",
 					deployment: "vendor_saas",
 					status: "active",
@@ -178,7 +178,7 @@ export async function syncInventoryFromUsage(): Promise<void> {
 				},
 				$setOnInsert: {
 					riskTier: "limited",
-					dataClasses: ["research_notes"],
+					dataClasses: ["research_projects"],
 					facultiesAllowed: [],
 					rolesAllowed: [],
 					ownerName: "",
