@@ -19,6 +19,8 @@ export type PublicUser = {
 	status: string;
 	department: string | null;
 	institution: string | null;
+	programme: string | null;
+	cohort: string | null;
 	universityId: string | null;
 	lastActiveAt: string | null;
 	createdAt: string;
@@ -44,6 +46,8 @@ async function toPublicUser(user: UserDocument | Record<string, unknown>): Promi
 		status: doc.status,
 		department: doc.department ?? null,
 		institution: doc.institution ?? null,
+		programme: doc.programme ?? null,
+		cohort: doc.cohort ?? null,
 		universityId: doc.universityId ? doc.universityId.toString() : null,
 		lastActiveAt: doc.lastActiveAt?.toISOString() ?? null,
 		createdAt: doc.createdAt.toISOString(),
