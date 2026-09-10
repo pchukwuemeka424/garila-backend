@@ -17,7 +17,8 @@ import {
 	formatAuthorLine,
 	formatNarrativeCite,
 	formatParentheticalCite,
-	formatApa7Reference,
+	formatReferenceEntryByStyle,
+	getCitationStyleInstructions,
 	isNumberedCitationStyle,
 	paperIsCitable,
 } from "../lib/citation-bank.js";
@@ -238,22 +239,29 @@ export function formatPapersForContext(
 	minDistinctCites = 25,
 	styleLabel?: string | null,
 	protocol?: RetrievalProtocol,
+	options?: { maxPapers?: number; abstractChars?: number },
 ): string {
-	if (papers.length === 0) {
+	const limited = options?.maxPapers ? papers.slice(0, options.maxPapers) : papers;
+	if (limited.length === 0) {
 		return `No papers were found via ${sourceLabel} for "${query}". Do not invent authors, years, titles, or DOIs. Omit claims that cannot be grounded in retrieved papers or user-supplied evidence. Do not cite sources from parametric memory. Do not invent Scopus, Web of Science, ERIC, IEEE Xplore, PRISMA counts, or dual reviewers.`;
 	}
 
-	const numbered = isNumberedCitationStyle(styleLabel ?? "");
-	const abstractBudget = papers.length >= minDistinctCites ? 320 : 600;
-	const lines = papers.map((paper, index) => {
+	const targetStyle = styleLabel?.trim() || "APA 7th edition";
+	const numbered = isNumberedCitationStyle(targetStyle);
+	const styleInstructions = getCitationStyleInstructions(targetStyle);
+	const abstractBudget =
+		options?.abstractChars ??
+		(limited.length >= minDistinctCites ? 280 : 480);
+	const lines = limited.map((paper, index) => {
 		const authorLine = formatAuthorLine(paper.authors);
 		const year = citeYear(paper);
 		const title = cleanReferenceTitle(paper.title.replace(/\*/g, ""));
 		const abstract = paper.abstract
 			? paper.abstract.replace(/\s+/g, " ").slice(0, abstractBudget)
 			: "Abstract unavailable.";
-		const parenthetical = formatParentheticalCite(paper, index, numbered);
-		const narrative = formatNarrativeCite(paper, index, numbered);
+		const parenthetical = formatParentheticalCite(paper, index, targetStyle);
+		const narrative = formatNarrativeCite(paper, index, targetStyle);
+		const refEntry = formatReferenceEntryByStyle(paper, targetStyle, index);
 		const card = inferEvidenceCard(paper);
 		const heNote = paperLooksHigherEducation(paper)
 			? "   Higher-education setting: yes — prefer this paper for university/undergraduate/faculty claims."
@@ -267,31 +275,36 @@ export function formatPapersForContext(
 			`   Population named in title/abstract: ${card.population}`,
 			`   Sample in abstract: ${card.sample}`,
 			heNote,
-			`   USE THIS CITE (copy exactly): ${parenthetical}`,
-			`   USE THIS NARRATIVE CITE: ${narrative}`,
-			`   APA 7 reference: ${formatApa7Reference(paper)}`,
+			`   USE THIS CITE (copy exactly — ${numbered ? "use this numbered bracket form" : "assignments must use this parenthetical bracket form only"}): ${parenthetical}`,
+			...(numbered
+				? []
+				: [`   USE THIS NARRATIVE CITE (non-assignment author–date only; assignments must not use this): ${narrative}`]),
+			`   ${targetStyle} reference: ${refEntry}`,
 			`   Abstract: ${abstract}`,
 		].join("\n");
 	});
 
 	const minRefsInstruction =
-		papers.length >= minDistinctCites
+		limited.length >= minDistinctCites
 			? `Cite and write from at least ${minDistinctCites} of these papers throughout literature-heavy body sections (prefer more when the bank is larger). References must list every bank paper cited in the body (≥${minDistinctCites} entries). Every References entry must appear as an in-text citation — no uncited padding.`
-			: `Cite and write from all ${papers.length} of these papers in the body. References must list every bank paper cited in the body. Do not invent filler references. Every References entry must appear as an in-text citation.`;
+			: `Cite and write from all ${limited.length} of these papers in the body. References must list every bank paper cited in the body. Do not invent filler references. Every References entry must appear as an in-text citation.`;
 
 	return [
-		`${sourceLabel} retrieved ${papers.length} real paper(s) for the query "${query}".`,
-		"Use these as primary literature sources. Insert in-text citations by copying the USE THIS CITE strings exactly. Do not invent author–years or reference numbers.",
+		`${sourceLabel} retrieved ${limited.length} real paper(s) for the query "${query}".`,
+		"Use these as primary literature sources. Insert in-text citations by copying the USE THIS CITE strings exactly.",
+		styleInstructions.inTextRule,
 		"Cite only papers with named authors and a four-digit year. Never write n.d., Unknown, or incomplete citations — skip undated papers and cite another bank paper.",
-		"Every major factual claim needs an in-text citation from this bank.",
-		"Cite only papers whose abstracts address the same field as the query. Do not analogize clinical, biomedical, or unrelated-domain findings to arts, humanities, or other off-field topics. If on-topic literature is thin, say so and write from the remaining on-topic abstracts.",
+		"Every major factual claim needs an in-text citation from this bank. For assignments, put a bank cite in nearly every body paragraph (Introduction through Conclusion, including Conclusion).",
+		"Cite only papers whose abstracts address the same field as the query. Do not analogize clinical, biomedical, finance/fintech, or unrelated-domain findings to education, arts, humanities, or other off-field topics. If on-topic literature is thin, say so and write from the remaining on-topic abstracts.",
 		"When the query concerns higher education, privilege papers marked as higher-education settings. Do not treat K-12, hospital, or generic workplace findings as university evidence.",
 		"Claim discipline: never change the studied population from the title/abstract (e.g. do not describe a student survey as a faculty study). Do not cite perspective/commentary/agenda papers as empirical measurements of acceptance, performance, or efficiency. Do not generalise a single small-N or single-course finding into a field-wide effect; name the design and sample when the card states them. Reviews of prior studies are not evidence that ‘AI improves academic performance’ in general.",
 		minRefsInstruction,
 		"Paraphrase and synthesize bank abstracts into literature claims — do not pad the References list without in-text cites.",
-		"In the References section, use APA 7: Author, A. A., & Author, B. B. (Year). Title. Journal (if known). URL. Copy the APA 7 reference line. Never mention preprint servers, repository names, or paper ID numbers.",
+		"Do not attribute findings, statistics, sample sizes, effect sizes, or institutional claims beyond what each paper’s Abstract and evidence card state. If the abstract does not support a claim, omit it.",
+		styleInstructions.referencesRule,
+		`In the References section, use the ${targetStyle} reference line provided above for each paper. Never mention preprint servers, repository names, or paper ID numbers.`,
 		"Do not invent papers outside this list.",
-		protocol ? formatRetrievalProtocolBlock(protocol, query, papers) : "",
+		protocol ? formatRetrievalProtocolBlock(protocol, query, limited) : "",
 		"",
 		...lines,
 	]
@@ -616,7 +629,7 @@ export function formatSelectionFlowTable(protocol: RetrievalProtocol): string {
 }
 
 export function formatExtractionTable(papers: AlphaXivPaper[]): string {
-	const rows = papers.slice(0, 18).map((paper) => {
+	const rows = papers.slice(0, 10).map((paper) => {
 		const names = paper.authors.length ? formatAuthorLine(paper.authors.slice(0, 1), 1) : "Unknown";
 		const year = citeYear(paper);
 		const card = inferEvidenceCard(paper);
@@ -624,8 +637,8 @@ export function formatExtractionTable(papers: AlphaXivPaper[]): string {
 		return `| ${names} (${year}). ${title} | ${card.type} | ${card.population} | ${card.sample} |`;
 	});
 	const extra =
-		papers.length > 18
-			? `\nRemaining ${papers.length - 18} included papers appear in References; do not invent extra rows.`
+		papers.length > 10
+			? `\nRemaining ${papers.length - 10} included papers appear in References; do not invent extra rows.`
 			: "";
 	return [
 		"| Study | Evidence type (from title/abstract) | Population named | Sample (from abstract only) |",
@@ -1061,19 +1074,25 @@ export async function buildPaperSearchContext(
 		bank,
 	);
 	const sourceLabel = PAPER_SOURCE_LABELS[fetched.source];
+	const compactBank = bank.length > 36;
+	const context = formatPapersForContext(
+		bank,
+		trimmed,
+		sourceLabel,
+		minDistinctCites,
+		options?.citationStyle,
+		protocol,
+		{
+			maxPapers: Math.min(bank.length, limit),
+			abstractChars: compactBank || limit <= 24 ? 220 : undefined,
+		},
+	);
 
 	return {
 		papers: bank,
 		source: fetched.source,
 		protocol,
-		context: formatPapersForContext(
-			bank,
-			trimmed,
-			sourceLabel,
-			minDistinctCites,
-			options?.citationStyle,
-			protocol,
-		),
+		context: context.length > 55_000 ? `${context.slice(0, 55_000).trimEnd()}\n[Literature bank truncated to fit context.]` : context,
 	};
 }
 

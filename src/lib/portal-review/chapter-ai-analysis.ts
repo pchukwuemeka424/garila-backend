@@ -1227,12 +1227,13 @@ export function runChapterReviewPipeline(opts: {
 
   const localQuotes = pickFallbackHighlightQuotes(text);
   const highlightQuotes: ReviewTextHighlights = {
-    strengths: [],
+    strengths: localQuotes.strengths || [],
     weaknesses: localQuotes.weaknesses || [],
     citations:
       evidence.citationQuotes.length > 0
         ? evidence.citationQuotes
         : localQuotes.citations || [],
+    wrongClaims: localQuotes.wrongClaims || [],
   };
 
   const baseResult: ChapterReviewPipelineResult = {

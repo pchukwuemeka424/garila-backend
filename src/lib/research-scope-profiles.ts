@@ -103,27 +103,32 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 		],
 		citationFloors: floors([
 			["Introduction", 5, 8],
-			["Literature Review", 8, 12],
-			["Critical Analysis", 6, 9],
+			["Literature Review", 10, 14],
+			["Critical Analysis", 8, 12],
 			["Conclusion", 3, 4],
 			["References", 0, 0],
 		]),
 		minDistinctCites: 20,
 		wordTarget: { min: 1900, max: 2100 },
 		outlineGuidance:
-			"Coursework assignment outline: focused topic/aims, short thematic literature themes, argumentative critical-analysis points, conclusion takeaways — no Methodology, Results, timeline, or empirical findings.",
+			"Brief-first assignment: when a user brief is present, mirror its required sections, parts, questions, and tasks; cover every brief requirement. Fallback only when no brief structure is given: Title, Introduction, Literature Review, Critical Analysis, Conclusion, References. No invented Methodology, Results, timeline, or empirical findings.",
 		sectionJobs: [
-			"**Critical Analysis** is the argumentative core: evaluate claims, compare perspectives, and build a reasoned position with bank cites.",
-			"**Literature Review** is short and thematic (not paper-by-paper); introduce debates and gaps only.",
-			"Never add Abstract, Keywords, Methodology, Methods, Results, Findings, or Results / Analysis sections.",
-			"Do not invent completed empirical results, surveys, or datasets — this is a coursework assignment, not a research paper.",
-			"Body length must be 1,900–2,100 words excluding references.",
-			"Cite at least 20 distinct retrieval-bank papers with real four-digit years (never n.d., Unknown, or incomplete author–year). Every major factual claim needs an in-text citation. Every References entry must appear as an in-text citation.",
+			"BRIEF-FIRST (hard): The user-provided assignment brief is PRIMARY. Explain and satisfy every element in it — numbered questions, tasks, learning outcomes, required sections/parts, theories, cases, marking criteria, word count, and referencing style. Do not drop, merge away, or invent a different assignment question.",
+			"STRUCTURE: If the brief names sections (e.g. Part A/B, Discussion, Recommendations, Appendices), use those bold headings (plus References unless the brief forbids). If the brief lists questions/tasks without headings, create clearly labelled subsections that answer each item in order. Do not collapse all brief tasks into a single Critical Analysis block.",
+			"FALLBACK structure (only when the brief does not specify structure): Title, Introduction, Literature Review, Critical Analysis, Conclusion, References.",
+			"VOICE: Write as a doctoral / PhD-level academic — analytical, theory-aware, critically evaluative, discipline-precise. No undergraduate summary tone, bullet-essay padding, or stock AI phrases.",
+			"When using the fallback template: Literature Review is thematic (not paper-by-paper); Critical Analysis evaluates claims and builds a reasoned position with bank cites.",
+			"Never invent completed empirical results, surveys, or datasets. Do not add Abstract, Keywords, Methodology, Methods, Results, or Findings unless the brief explicitly requires a literature-grounded methods discussion (still no fake data).",
+			"Body length must be 1,900–2,100 words excluding references unless the brief sets a different word count.",
+			"REFERENCES (hard): Cite and list at least 20 distinct retrieval-bank papers with real four-digit years (never n.d., Unknown, or incomplete source details) whenever the bank has ≥20 papers. Every major factual claim needs an in-text citation. Every References entry must appear as an in-text citation. A References section with fewer than 20 bank entries when the bank has ≥20 is invalid.",
+			"CITATIONS (hard): Copy each bank paper’s USE THIS CITE string exactly (bracket/parenthetical forms matching the selected reference style). Put citations on every body paragraph in Introduction, literature/theme sections, argument sections, and Conclusion — including the first Introduction paragraph and the Conclusion. Do not leave those paragraphs uncited. Do not invent citations or decorate claims with mismatched cites.",
+			"FACT GROUNDING (hard): Do not invent statistics, sample sizes, effect sizes, percentages, or country/institution claims unless they appear in the cited paper’s abstract or evidence card. Cite only papers whose abstracts match the claim’s field (education claims need education evidence; do not cite finance, clinical, or unrelated-domain papers for education ethics/policy). If a point cannot be grounded in the cited abstract, omit it — never fabricate support.",
 			"When the topic concerns universities, undergraduates, faculty, or tertiary study, privilege bank papers that present direct higher-education evidence — do not treat K-12 or generic workplace findings as HE evidence.",
-			"Format References in APA 7: Author, A. A., & Author, B. B. (Year). Title. Journal (if known). https://doi.org/… — hanging-list as plain lines, no markdown title links required.",
+			"Format References according to the selected reference style unless the brief mandates another style. Every References entry must be cited in the body.",
 			"Never write meta-commentary such as “this point is not clearly supported by the cited abstract”. If evidence is thin, omit the claim or hedge in academic prose without mentioning abstracts or fact-checking.",
+			"Prefer prose; place any illustrative synthesis tables in **Literature Review** or **Critical Analysis**; never invent empirical Results unless the brief requires them.",
 		],
-		maxTokens: 9_000,
+		maxTokens: 14_000,
 	},
 	conference: {
 		scope: "conference",
@@ -147,6 +152,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Keep Abstract ≤150 words; Keywords 5–8 terms.",
 			"Methods must be reproducible but concise; Results report findings only; Discussion interprets against literature.",
 			"Do not expand into thesis chapters or add Title Page / Declaration front matter.",
+			"Place empirical tables/charts/figures in **Results**; study design and protocol tables in **Methods**; conceptual models in **Introduction**; never after References.",
 		],
 		maxTokens: 10_000,
 	},
@@ -173,6 +179,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Follow IMRaD strictly: Introduction → Methods → Results → Discussion → Conclusion.",
 			"Synthesize literature thematically in Introduction and Discussion — not a standalone Literature Review section.",
 			"Methods must be reproducible; Results are evidence-only; Discussion interprets vs literature with explicit Limitations.",
+			"Place empirical tables/charts/figures in **Results**; study design and protocol tables in **Methods**; conceptual models in **Introduction**; never after References.",
 		],
 		maxTokens: 12_000,
 	},
@@ -214,6 +221,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Executive Summary is citation-free and must preview objectives, key findings, and recommendations.",
 			"**Recommendations** must be actionable, numbered or clearly itemised, and grounded in Findings/Analysis.",
 			"Do not force journal IMRaD labels (no Literature Review / Results / Discussion pair).",
+			"Place empirical tables/charts/figures in **Findings**; methods tables in **Methods**; synthesis tables in **Background**; never after References.",
 		],
 		maxTokens: 10_000,
 	},
@@ -255,6 +263,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Methodology describes planned methods only — do not invent completed Results or Findings.",
 			"Timeline and Budget are forward-looking plans; Expected Outcomes state anticipated contributions, not observed data.",
 			"Never add Results, Findings, Results / Analysis, or Critical Analysis sections.",
+			"Place planned protocol/instrument tables in **Methodology**; synthesis tables and conceptual models in **Literature Review**; never invent Results or place visuals after References.",
 		],
 		maxTokens: 10_000,
 	},
@@ -296,6 +305,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Same proposal rules at faculty scale: planned methods only; denser Literature Review and multi-year Timeline/Budget.",
 			"Never invent completed empirical Results or Findings.",
 			"Do not collapse into journal IMRaD or thesis chapters.",
+			"Place planned protocol/instrument tables in **Methodology**; synthesis tables and conceptual models in **Literature Review**; never invent Results or place visuals after References.",
 		],
 		maxTokens: 12_000,
 	},
@@ -343,6 +353,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Keep Abstract 150–250 words and citation-free; cover topic, method/approach, key results, and implication.",
 			"Front matter (Title Page, Declaration, Abstract, Acknowledgments, Table of Contents) stays citation-free where floors are 0.",
 			"Chapter Five reports testing/results; Chapter Six interprets; Chapter Seven concludes with recommendations.",
+			"Place empirical visuals in **Chapter Five: Testing and Results**; design diagrams in **Chapter Four**; protocol/analysis tables in **Chapter Three**; synthesis tables in **Chapter Two**; never after References.",
 		],
 		maxTokens: 16_000,
 	},
@@ -388,8 +399,9 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Keep Abstract 250–350 words and citation-free; cover problem, method, headline findings, and implication.",
 			"Literature Review is substantial and thematic; Methodology is reproducible; Findings / Results are evidence-only.",
 			"Recommendations are distinct from Conclusion and actionable for practice or further research.",
+			"Place empirical tables/charts/figures in **Findings / Results**; conceptual models and synthesis tables in **Literature Review**; protocol tables in **Methodology**; never after References.",
 		],
-		maxTokens: 20_000,
+		maxTokens: 16_000,
 	},
 	dissertation: {
 		scope: "dissertation",
@@ -441,8 +453,9 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Keep Abstract 300–500 words and citation-free; cover problem, method, headline findings, and contributions.",
 			"**Theoretical Framework** must be distinct from Literature Review; **Contributions** must state novel scholarly contributions.",
 			"Results are evidence-only; Discussion interprets against literature and theory.",
+			"Place empirical tables/charts/figures in **Results**; conceptual models in **Theoretical Framework**; synthesis tables in **Literature Review**; never after References.",
 		],
-		maxTokens: 24_000,
+		maxTokens: 16_000,
 	},
 };
 
@@ -495,7 +508,7 @@ export function formatCitationFloorsForPrompt(profile: ScopeProfile): string {
 
 export function formatAcademicIntegrityRules(profile: ScopeProfile): string[] {
 	const min = profile.minDistinctCites;
-	return [
+	const lines = [
 		"Cite ONLY papers from the conversation literature retrieval / research API bank. Copy USE THIS CITE strings exactly (they already use family names, never given-name initials). Do not invent authors, years, titles, or DOIs.",
 		"Never cite n.d., Unknown, or incomplete sources. Use only bank papers with named authors and a four-digit year. If a paper has no year, skip it and cite another bank paper.",
 		"Paraphrase / synthesize bank evidence cards and abstracts into literature claims. Every cited sentence must be supported by the cited paper’s abstract — no decorative cites. No statistics, sample sizes, or effect sizes that are not in that abstract.",
@@ -504,23 +517,40 @@ export function formatAcademicIntegrityRules(profile: ScopeProfile): string[] {
 		"Claim discipline: copy the studied population from the paper’s title/abstract (students vs faculty). Do not cite perspective/commentary/agenda papers as empirical measurements. Do not generalise one small-N or single-course finding into a field-wide effect; name design and sample when the evidence card states them.",
 		"Never invent a literature search. If Methodology describes searching literature, use ONLY the RETRIEVAL PROTOCOL (APIs, query, date, counts). Do not claim Web of Science, Scopus, ERIC, IEEE Xplore, PubMed, dual independent reviewers, kappa, CASP/MMAT, or PRISMA registration unless those appear in the protocol. For review topics: include the supplied selection-flow and extraction tables; write Results as corpus synthesis (“Of the N included records…”); avoid causal “Impact of…” titles; do not repeat the same finding across Literature Review, Results, Discussion, and Conclusion.",
 		"Citation scope (hard): every major factual claim needs a bank in-text cite; prose must not exceed what that cite’s abstract supports; no uncited filler outside Methods/Results study evidence; omit points that cannot be grounded. Do not fall back to uncited general knowledge.",
-		`References list: APA 7 (Author, A. A., & Author, B. B. (Year). Title. Source. URL). 1:1 match — every in-text bank cite has a References entry, and every References entry is cited in the body. Cite at least ${min} distinct bank papers in both the body and References. Use the retrieval bank until this floor is met; only if retrieval returns fewer than ${min} papers may the list equal the full bank (still every entry cited in-text). Never invent fillers or pad uncited entries. A References section that invents sources or lists uncited papers is invalid.`,
+		`References list: format in the selected reference style (1:1 match — every in-text bank cite has a References entry, and every References entry is cited in the body). Cite at least ${min} distinct bank papers in both the body and References. Use the retrieval bank until this floor is met; only if retrieval returns fewer than ${min} papers may the list equal the full bank (still every entry cited in-text). Never invent fillers or pad uncited entries. A References section that invents sources or lists uncited papers is invalid.`,
 		"Never insert editorial asides about abstracts, fact-checking, or unsupported cites (e.g. “this point is not clearly supported by the cited abstract”). Hedge in academic language or omit the claim.",
 		"Abstract / Executive Summary / front matter: zero in-text citations where the profile marks 0; those sections may only summarize content the body later grounds in cites or study evidence.",
 		"Strong academic English: discipline-precise, argumentative, non-formulaic; prefer analytical verbs over vague intensifiers; ban stock AI phrases (e.g. “rapidly evolving”, “delve into”, “landscape of”, “it is worth noting”).",
 		"Anti-repetition: do not recycle the same summary across overview, introduction, discussion, and conclusion sections; vary wording within paragraphs.",
 		"Do not use hash (#) Markdown headings or horizontal rules (---, --).",
 	];
+	if (profile.scope === "assignment") {
+		lines.push(
+			"Assignment register: write as a PhD-level academic — critical synthesis and theoretical precision, not undergraduate paraphrase.",
+			`Assignment References floor (hard): when the retrieval bank has ≥${min} papers, the References section must contain at least ${min} distinct bank entries, each also cited in-text. Fewer than ${min} is invalid.`,
+			"Assignment fact check: every cited sentence must be supported by that paper’s abstract/evidence card. Use ONLY USE THIS CITE forms matching the selected reference style. Stay in-field (no off-topic bank papers). Omit unsupported numbers, effects, or institutional claims rather than inventing them.",
+		);
+	}
+	return lines;
 }
 
 export function formatStructureInstructions(profile: ScopeProfile): string[] {
 	const hasKeywords = profile.headings.includes("Keywords");
 	const hasStudyArea = profile.headings.includes("Study area");
+	const isAssignment = profile.scope === "assignment";
 	const lines = [
-		`Write a complete academic ${profile.label} (not a generic journal article unless the scope is Journal/Research Paper).`,
-		`Target body length: ${profile.wordTarget.min.toLocaleString()}–${profile.wordTarget.max.toLocaleString()} words excluding references.`,
-		`Use this exact section order with bold-only headings on their own lines: ${formatHeadingsForPrompt(profile)}.`,
-		`In-text citation floors (distinct author–year from the retrieval bank): ${formatCitationFloorsForPrompt(profile)}. Across the full body, cite at least ${profile.minDistinctCites} distinct bank papers in-text. Use the retrieval bank until this floor is met; only if retrieval returns fewer than ${profile.minDistinctCites} papers may you cite every retrieved paper (still all cited; never invent extras). Prefer grounded paraphrases over density padding.`,
+		isAssignment
+			? "Write a complete PhD-level academic Assignment that fully explains and satisfies the user-provided brief (not a generic journal article)."
+			: `Write a complete academic ${profile.label} (not a generic journal article unless the scope is Journal/Research Paper).`,
+		`Target body length: ${profile.wordTarget.min.toLocaleString()}–${profile.wordTarget.max.toLocaleString()} words excluding references${
+			isAssignment ? " — unless the brief sets a different word count, which then controls." : "."
+		}`,
+		isAssignment
+			? `Section order (brief wins): if the assignment brief names sections, parts, or ordered tasks, use those as bold-only headings (plus References unless forbidden). Only if the brief does not specify structure, use this fallback order: ${formatHeadingsForPrompt(profile)}.`
+			: `Use this exact section order with bold-only headings on their own lines: ${formatHeadingsForPrompt(profile)}.`,
+		isAssignment
+			? `In-text citation floors for the fallback template (distinct retrieval-bank citations matching the chosen reference style): ${formatCitationFloorsForPrompt(profile)}. Across the full body — whatever headings the brief requires — cite at least ${profile.minDistinctCites} distinct bank papers in-text and in References. Use the retrieval bank until this floor is met; only if retrieval returns fewer than ${profile.minDistinctCites} papers may you cite every retrieved paper (still all cited; never invent extras). Prefer grounded paraphrases over density padding.`
+			: `In-text citation floors (distinct retrieval-bank citations matching the chosen reference style): ${formatCitationFloorsForPrompt(profile)}. Across the full body, cite at least ${profile.minDistinctCites} distinct bank papers in-text. Use the retrieval bank until this floor is met; only if retrieval returns fewer than ${profile.minDistinctCites} papers may you cite every retrieved paper (still all cited; never invent extras). Prefer grounded paraphrases over density padding.`,
 		profile.outlineGuidance,
 		...profile.sectionJobs,
 	];
@@ -548,8 +578,9 @@ export function formatStructureInstructions(profile: ScopeProfile): string[] {
 		lines.push("Never skip **Abstract**; do not merge it with other sections.");
 	}
 	if (
-		profile.headings.includes("Introduction") ||
-		profile.headings.includes("Chapter One: Introduction")
+		!isAssignment &&
+		(profile.headings.includes("Introduction") ||
+			profile.headings.includes("Chapter One: Introduction"))
 	) {
 		lines.push("Never skip the Introduction section; do not merge it with Abstract or Literature Review.");
 	}
@@ -558,9 +589,9 @@ export function formatStructureInstructions(profile: ScopeProfile): string[] {
 			"Do NOT include Results, Findings, or Results / Analysis sections — this is a proposal/plan, not an empirical paper.",
 		);
 	}
-	if (profile.scope === "assignment") {
+	if (isAssignment) {
 		lines.push(
-			"Do NOT include Methodology, Methods, Results, Findings, Abstract, or Keywords — this is a coursework assignment.",
+			"Do not invent Methodology, Methods, Results, Findings, Abstract, or Keywords unless the brief explicitly requires a literature-grounded methods discussion (still no fake empirical data).",
 		);
 	}
 	return lines;

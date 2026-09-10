@@ -41,7 +41,14 @@ export async function resetUserPassword(id: string, password: string, scope?: Ad
 	}
 
 	const passwordHash = await hashPassword(password);
-	const user = await UserModel.findByIdAndUpdate(id, { passwordHash }, { new: true }).lean();
+	const user = await UserModel.findByIdAndUpdate(
+		id,
+		{
+			passwordHash,
+			$unset: { passwordResetTokenHash: 1, passwordResetExpires: 1 },
+		},
+		{ new: true },
+	).lean();
 	if (!user) return null;
 
 	return {

@@ -26,6 +26,25 @@ const pageSchema = new Schema(
 		reviewAnnotatedHtml: { type: String, default: "", maxlength: 1_500_000 },
 		reviewedAt: Date,
 		reviewedBy: Schema.Types.ObjectId,
+		reviewTrail: {
+			type: [
+				{
+					type: {
+						type: String,
+						enum: ["submitted", "rewrite_requested", "approved"],
+						required: true,
+					},
+					at: { type: Date, required: true },
+					actorId: Schema.Types.ObjectId,
+					remark: { type: String, default: "", maxlength: 50_000 },
+					contentHtml: { type: String, default: "", maxlength: 500_000 },
+					annotatedHtml: { type: String, default: "", maxlength: 1_500_000 },
+					versionNumber: { type: Number, min: 1 },
+					wordCount: { type: Number, min: 0 },
+				},
+			],
+			default: [],
+		},
 		aiCorrectionFindings: { type: [Schema.Types.Mixed], default: [] },
 		aiCorrectionSummary: { type: String, default: "", maxlength: 8000 },
 		aiCorrectionChecks: { type: [Schema.Types.Mixed], default: [] },
@@ -68,7 +87,7 @@ const schema = new Schema(
 		},
 		assignmentBriefId: Schema.Types.ObjectId,
 		score: { type: Number, default: null, min: 0, max: 1000 },
-		scoreNote: { type: String, default: "", maxlength: 500 },
+		scoreNote: { type: String, default: "", maxlength: 8_000 },
 		scoredAt: Date,
 		scoredBy: Schema.Types.ObjectId,
 		scoreSource: {

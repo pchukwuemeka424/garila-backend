@@ -41,23 +41,42 @@ export function buildResearchFigureBlock(input: {
 	return ["```research-figure", JSON.stringify(payload), "```"].join("\n");
 }
 
-const RESULTS_HEADING = /^#{1,3}\s+(results?|findings?|testing)\b.*$/im;
+const RESULTS_HEADING =
+	/^(?:#{1,3}\s+|\*\*)(?:(?:Chapter\s+(?:Five|5)[:\s]+)?(?:Testing\s+and\s+)?Results?|Findings(?:\s*\/\s*Results)?|Results(?:\s*(?:\/|and)\s*Analysis)?)\b(?:\*\*)?.*$/im;
+const METHODOLOGY_HEADING =
+	/^(?:#{1,3}\s+|\*\*)(?:(?:Chapter\s+(?:Three|3)[:\s]+)?(?:System\s+Analysis\s+and\s+)?Methodology|Methods)\b(?:\*\*)?.*$/im;
+const REFERENCES_HEADING = /^(?:#{1,3}\s+|\*\*)References(?:\*\*)?\s*$/im;
+const NEXT_SECTION_HEADING = /^(?:#{1,3}\s+|\*\*)[A-Za-z][^*\n]*?(?:\*\*)?\s*$/m;
 
-/** Insert saved figure blocks after Results/Findings, or append if that heading is missing. */
+function insertIntoHeading(content: string, blocks: string, heading: RegExp): string | null {
+	const body = content.trimEnd();
+	const match = heading.exec(body);
+	if (!match || match.index == null) return null;
+	const afterStart = match.index + match[0].length;
+	const rest = body.slice(afterStart);
+	const nextHeading = rest.search(NEXT_SECTION_HEADING);
+	if (nextHeading >= 0) {
+		const insertAt = afterStart + nextHeading;
+		return `${body.slice(0, insertAt).trimEnd()}\n\n${blocks}\n\n${body.slice(insertAt)}`;
+	}
+	return `${body.slice(0, afterStart).trimEnd()}\n\n${blocks}\n`;
+}
+
+/**
+ * Insert saved figure blocks into Results/Findings (or Methodology for proposals),
+ * else before References — never after bibliography.
+ */
 export function injectSavedFiguresIntoPaper(content: string, figureMarkdown: string): string {
 	const blocks = figureMarkdown.trim();
 	if (!blocks) return content;
+	const intoResults = insertIntoHeading(content, blocks, RESULTS_HEADING);
+	if (intoResults != null) return intoResults;
+	const intoMethods = insertIntoHeading(content, blocks, METHODOLOGY_HEADING);
+	if (intoMethods != null) return intoMethods;
 	const body = content.trimEnd();
-	const match = RESULTS_HEADING.exec(body);
-	if (!match || match.index == null) {
-		return `${body}\n\n${blocks}\n`;
+	const refs = REFERENCES_HEADING.exec(body);
+	if (refs && refs.index != null) {
+		return `${body.slice(0, refs.index).trimEnd()}\n\n${blocks}\n\n${body.slice(refs.index)}`;
 	}
-	const afterStart = match.index + match[0].length;
-	const rest = body.slice(afterStart);
-	const nextHeading = rest.search(/^#{1,3}\s+\S/m);
-	if (nextHeading < 0) {
-		return `${body}\n\n${blocks}\n`;
-	}
-	const insertAt = afterStart + nextHeading;
-	return `${body.slice(0, insertAt).trimEnd()}\n\n${blocks}\n\n${body.slice(insertAt)}`;
+	return `${body}\n\n${blocks}\n`;
 }

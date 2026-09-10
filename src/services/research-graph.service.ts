@@ -986,7 +986,7 @@ function plotToMarkdownTable(plot: GraphPlotResult): string {
 	if (!keys.length || !plot.series.length) return "";
 	const header = `| ${keys.map(escapeMarkdownCell).join(" | ")} |`;
 	const divider = `| ${keys.map(() => "---").join(" | ")} |`;
-	const rows = plot.series.slice(0, 30).map((row) => {
+	const rows = plot.series.slice(0, 10).map((row) => {
 		return `| ${keys.map((key) => escapeMarkdownCell(row[key] ?? "")).join(" | ")} |`;
 	});
 	return [header, divider, ...rows].join("\n");
@@ -1000,7 +1000,7 @@ function plotToChartBlock(plot: GraphPlotResult): string {
 		caption: `Generated from the selected dataset “${plot.datasetTitle}”.`,
 		xKey: plot.xKey,
 		yKeys: plot.yKeys,
-		data: plot.series.slice(0, 30),
+		data: plot.series.slice(0, 10),
 	};
 	return ["```research-chart", JSON.stringify(payload, null, 2), "```"].join("\n");
 }
@@ -1073,7 +1073,8 @@ function savedFiguresCatalog(figures: { title: string; fileName: string }[]): st
 	});
 	return [
 		"### Saved notebook figures (pixels attached after generation)",
-		"Discuss these by number in Results/Findings. Do not invent image URLs, `research-figure` blocks, or extra illustrative images.",
+		"Discuss these by number in the empirical results section for this deliverable (Results, Findings / Results, Findings, or Chapter Five: Testing and Results). For proposals/grants with no Results section, discuss them in Methodology as planned instruments only.",
+		"Do not invent image URLs, `research-figure` blocks, or extra illustrative images.",
 		"",
 		...lines,
 	].join("\n");

@@ -199,7 +199,12 @@ Return ONLY valid JSON:
   "qualityChecks": [{ "name": string, "score": number 0-100, "comment": string }],
   "aiContent": { "detected": boolean, "percent": number 0-100, "signals": string[] },
   "aiSuggestedScore": number,
-  "highlightQuotes": { "weaknesses": string[] 3-6 exact excerpts from DIFFERENT parts },
+  "highlightQuotes": {
+    "strengths": string[] 1-4 exact excerpts of strong academic passages from DIFFERENT parts,
+    "weaknesses": string[] 3-6 exact excerpts from DIFFERENT parts,
+    "citations": string[] 2-6 exact excerpts of claims that need an in-text citation,
+    "wrongClaims": string[] 0-4 exact excerpts of inaccurate, overstated, or contradictory claims
+  },
   "supervisorRecommendation": string,
   "estimatedGrade": string
 }
@@ -208,8 +213,8 @@ Rules:
 (2) PARTIAL_MATCH: do not award near-full marks; reflect missing components.
 (3) Weakness severity ≥ 75 => mark ≤ 35% of max.
 (4) Never invent satisfied requirements.
-(5) highlightQuotes must be EXACT contiguous excerpts from the submission (12–220 chars).
-(6) remarksSummary MUST be approximately 200 words (±25) of continuous academic prose a lecturer would paste into feedback. Do NOT use bullet lists, checklist phrasing (“Positives noted:”, “Weak against:”), or telegraphic fragments. Weave criterion names and marks into full sentences. Include a clear provisional mark and one concrete revision priority. AFTER the mark paragraph, add EXACTLY two further paragraphs: (a) “Before confirming this mark…” listing 2–3 points that still require lecturer judgement / further checks; (b) a final “Where to check in the work:” paragraph with concrete locations (introduction, mid-body, references, yellow Weakness highlights, orange Needs-citation highlights, rubric / quality-check panels). Keep the whole remarksSummary near 200 words.
+(5) highlightQuotes must be EXACT contiguous excerpts from the submission (12–220 chars). Include all four kinds when evidence exists: strengths (green), weaknesses (yellow), citations needing in-text support (orange), wrongClaims (red). Never quote headings or reference-list lines.
+(6) remarksSummary MUST be approximately 200 words (±25) of continuous academic prose a lecturer would paste into feedback. Do NOT use bullet lists, checklist phrasing (“Positives noted:”, “Weak against:”), or telegraphic fragments. Weave criterion names and marks into full sentences. Include a clear provisional mark and one concrete revision priority. AFTER the mark paragraph, add EXACTLY two further paragraphs: (a) “Before confirming this mark…” listing 2–3 points that still require lecturer judgement / further checks; (b) a final “Where to check in the work:” paragraph with concrete locations (introduction, mid-body, references, yellow Weakness highlights, orange Needs-citation highlights, red Wrong-claim highlights, green Strength highlights, rubric / quality-check panels). Keep the prose near 200 words. A section-by-section Strength / Weakness / Needs citation / Wrong claim / Missing block will be appended automatically — do not duplicate it.
 (7) Official mark comes from criterionScores / aiSuggestedScore; qualityChecks are diagnostic and must not invent extra marks beyond maxScore.`;
 
 export function buildMarkerUserPrompt(opts: {

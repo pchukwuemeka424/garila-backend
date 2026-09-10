@@ -4,6 +4,7 @@ import { ResearchJobModel } from "../db/models/ResearchJob.js";
 import type { AppContext } from "../lib/app-context.js";
 import { ChatService } from "./chat.service.js";
 import { attachSavedResearchSources, injectSavedFiguresIntoSavedPaper } from "./research.service.js";
+import { buildResearchSourceContext } from "./research-source-context.service.js";
 
 export type ResearchJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -15,6 +16,8 @@ export type ResearchJobDto = {
 	status: ResearchJobStatus;
 	/** 0–100 generation progress. */
 	progress: number;
+	/** Live partial paper text while streaming (may be empty during prepare). */
+	draftContent: string;
 	savedResearchId: string | null;
 	error: string | null;
 	createdAt: string;
@@ -37,6 +40,7 @@ function toDto(doc: {
 	topic: string;
 	status: string;
 	progress?: number | null;
+	draftContent?: string | null;
 	savedResearchId?: Types.ObjectId | null;
 	error?: string | null;
 	createdAt: Date;
@@ -49,6 +53,7 @@ function toDto(doc: {
 		topic: doc.topic,
 		status: doc.status as ResearchJobStatus,
 		progress: clampProgress(doc.progress ?? 0),
+		draftContent: typeof doc.draftContent === "string" ? doc.draftContent : "",
 		savedResearchId: doc.savedResearchId?.toString() ?? null,
 		error: doc.error ?? null,
 		createdAt: doc.createdAt.toISOString(),
@@ -60,6 +65,14 @@ async function setJobProgress(jobId: string, progress: number): Promise<void> {
 	await ResearchJobModel.findByIdAndUpdate(jobId, {
 		progress: clampProgress(progress),
 	});
+}
+
+async function setJobDraft(jobId: string, draftContent: string, progress?: number): Promise<void> {
+	const update: { draftContent: string; progress?: number } = {
+		draftContent: draftContent.slice(0, 500_000),
+	};
+	if (typeof progress === "number") update.progress = clampProgress(progress);
+	await ResearchJobModel.findByIdAndUpdate(jobId, update);
 }
 
 export async function failOrphanedResearchJobs(): Promise<number> {
@@ -96,6 +109,50 @@ export async function getResearchJobById(
 	return doc ? toDto(doc) : null;
 }
 
+function promptHasNotebookLibrary(prompt: string): boolean {
+	return /Selected research library|RESEARCH NOTEBOOK LIBRARY|NOTEBOOK PAGE:/i.test(prompt);
+}
+
+/** Rebuild notebook folder text when the client prompt omitted it but sources were selected. */
+async function ensureNotebookContextInPrompt(
+	prompt: string,
+	userId: string,
+	sources?: {
+		documentIds?: string[];
+		datasetIds?: string[];
+		questionnaireIds?: string[];
+		noteIds?: string[];
+		projectIds?: string[];
+	} | null,
+): Promise<string> {
+	const hasProjects = Boolean(sources?.projectIds?.length);
+	const hasOther =
+		Boolean(sources?.documentIds?.length) ||
+		Boolean(sources?.datasetIds?.length) ||
+		Boolean(sources?.questionnaireIds?.length);
+	if ((!hasProjects && !hasOther) || promptHasNotebookLibrary(prompt)) {
+		return prompt;
+	}
+	try {
+		const context = (await buildResearchSourceContext(userId, sources ?? undefined)).trim();
+		if (!context) return prompt;
+		// Keep rebuild append modest — client prompts already carry outline/instructions.
+		const clipped = context.length > 28_000 ? `${context.slice(0, 28_000).trimEnd()}\n[Truncated]` : context;
+		return [
+			prompt.trimEnd(),
+			"",
+			"NOTEBOOK-FIRST (hard): The user selected a research notebook library and/or uploaded evidence. Use the FULL folder contents below as primary source material for this deliverable.",
+			"Align title, methods, findings/results, and contributions with this material. Do not invent a different study.",
+			"",
+			"**Selected research library**",
+			"",
+			clipped,
+		].join("\n");
+	} catch {
+		return prompt;
+	}
+}
+
 async function runPaperJob(input: {
 	ctx: AppContext;
 	jobId: string;
@@ -103,6 +160,7 @@ async function runPaperJob(input: {
 	topic: string;
 	prompt: string;
 	figureDocumentIds: string[];
+	visualizationMarkdown?: string;
 	sources?: {
 		documentIds?: string[];
 		datasetIds?: string[];
@@ -117,6 +175,9 @@ async function runPaperJob(input: {
 	let progress = 20;
 	let lastPersisted = 20;
 	let streamTicks = 0;
+	let draft = "";
+	let lastDraftPersist = 0;
+	let draftDirty = false;
 
 	const bump = (next: number) => {
 		const clamped = clampProgress(Math.max(progress, next));
@@ -128,9 +189,23 @@ async function runPaperJob(input: {
 		void setJobProgress(input.jobId, clamped);
 	};
 
+	const flushDraft = (force = false) => {
+		if (!draftDirty && !force) return;
+		const now = Date.now();
+		if (!force && now - lastDraftPersist < 400) return;
+		lastDraftPersist = now;
+		draftDirty = false;
+		void setJobDraft(input.jobId, draft, progress);
+	};
+
 	const unsubscribe = chat.subscribe((payload) => {
 		if (payload.type !== "agent_event") return;
-		const event = payload.event as { type?: string; toolName?: string } | undefined;
+		const event = payload.event as {
+			type?: string;
+			toolName?: string;
+			assistantMessageEvent?: { type?: string; delta?: string };
+			message?: { content?: string };
+		} | undefined;
 		if (!event?.type) return;
 
 		if (event.type === "tool_execution_start" && event.toolName === "alphaxiv_search") {
@@ -147,11 +222,23 @@ async function runPaperJob(input: {
 		}
 		if (event.type === "message_update") {
 			streamTicks += 1;
+			const delta = event.assistantMessageEvent?.delta;
+			if (typeof delta === "string" && delta) {
+				draft += delta;
+				draftDirty = true;
+				flushDraft();
+			}
 			// Climb from ~45 toward 92 as the paper streams.
 			bump(Math.min(92, 45 + streamTicks * 0.35));
 			return;
 		}
 		if (event.type === "message_end") {
+			const finalText = event.message?.content;
+			if (typeof finalText === "string" && finalText.trim()) {
+				draft = finalText;
+				draftDirty = true;
+				flushDraft(true);
+			}
 			bump(94);
 		}
 	});
@@ -161,10 +248,13 @@ async function runPaperJob(input: {
 		bump(progress + 1);
 	}, 2500);
 
+	const draftFlushTimer = setInterval(() => flushDraft(), 450);
+
 	try {
 		await ResearchJobModel.findByIdAndUpdate(input.jobId, {
 			status: "running",
 			progress: 20,
+			draftContent: "",
 			error: null,
 		});
 
@@ -182,22 +272,29 @@ async function runPaperJob(input: {
 		}
 
 		bump(25);
-		await chat.sendMessage(input.prompt, input.userId);
+		const prompt = await ensureNotebookContextInPrompt(
+			input.prompt,
+			input.userId,
+			input.sources,
+		);
+		await chat.sendMessage(prompt, input.userId);
 
 		const current = await ResearchJobModel.findById(input.jobId).lean();
 		if (!current || current.status === "cancelled") return;
 
 		const savedResearchId = chat.getLastSavedResearchId();
 		if (savedResearchId) {
-			if (input.figureDocumentIds.length) {
+			const viz = (input.visualizationMarkdown ?? "").trim();
+			if (input.figureDocumentIds.length || viz) {
 				try {
 					await injectSavedFiguresIntoSavedPaper(
 						savedResearchId,
 						input.userId,
 						input.figureDocumentIds,
+						viz,
 					);
 				} catch {
-					/* Paper is still usable without attached figures. */
+					/* Paper is still usable without attached notebook visuals. */
 				}
 			}
 			try {
@@ -210,6 +307,7 @@ async function runPaperJob(input: {
 				progress: 100,
 				savedResearchId: new Types.ObjectId(savedResearchId),
 				error: null,
+				...(draft.trim() ? { draftContent: draft.slice(0, 500_000) } : {}),
 			});
 			return;
 		}
@@ -230,6 +328,8 @@ async function runPaperJob(input: {
 		});
 	} finally {
 		clearInterval(creepTimer);
+		clearInterval(draftFlushTimer);
+		flushDraft(true);
 		unsubscribe();
 		runners.delete(input.jobId);
 	}
@@ -241,6 +341,7 @@ export async function startResearchPaperJob(input: {
 	prompt: string;
 	topic?: string;
 	figureDocumentIds?: string[];
+	visualizationMarkdown?: string;
 	sources?: {
 		documentIds?: string[];
 		datasetIds?: string[];
@@ -260,6 +361,7 @@ export async function startResearchPaperJob(input: {
 	const figureDocumentIds = (input.figureDocumentIds ?? [])
 		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
 		.slice(0, 8);
+	const visualizationMarkdown = (input.visualizationMarkdown ?? "").trim().slice(0, 40_000);
 
 	const topic = (input.topic?.trim() || prompt.slice(0, 200)).trim();
 	const created = await ResearchJobModel.create({
@@ -268,6 +370,7 @@ export async function startResearchPaperJob(input: {
 		status: "queued",
 		progress: 20,
 		figureDocumentIds,
+		...(visualizationMarkdown ? { visualizationMarkdown } : {}),
 		...(input.sources ? { sources: input.sources } : {}),
 	});
 
@@ -281,6 +384,7 @@ export async function startResearchPaperJob(input: {
 		topic,
 		prompt,
 		figureDocumentIds,
+		visualizationMarkdown,
 		sources: input.sources,
 	});
 

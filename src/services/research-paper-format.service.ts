@@ -1,4 +1,7 @@
 import {
+	cleanReferenceTitle,
+} from "../lib/citation-bank.js";
+import {
 	standardizeResearchSectionHeadings,
 	stripArxivMetaPreserveLayout,
 } from "./research-paper-sections.js";
@@ -6,15 +9,71 @@ import {
 const REFERENCES_HEADING = /^(?:\#{1,6}\s+|\*\*)References(?:\*\*)?\s*$/im;
 const ARXIV_ID = /[\d]{4}\.[\d]{4,5}(?:v\d+)?[a-z]?/i;
 
+/** Truncate markdown table data rows to at most maxRows (default 10). */
+export function limitTableRowsInMarkdown(content: string, maxRows = 10): string {
+	if (!content || !content.includes("|")) return content;
+
+	const lines = content.split("\n");
+	const output: string[] = [];
+	let inTable = false;
+	let dataRowCount = 0;
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const trimmed = line.trim();
+
+		const isTableRow =
+			trimmed.includes("|") &&
+			!trimmed.startsWith("```") &&
+			!trimmed.startsWith("#") &&
+			(trimmed.startsWith("|") || trimmed.includes(" | "));
+
+		if (!inTable) {
+			if (isTableRow && i + 1 < lines.length) {
+				const nextTrimmed = lines[i + 1].trim();
+				const isSeparator =
+					nextTrimmed.includes("-") &&
+					/^\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/.test(nextTrimmed);
+
+				if (isSeparator) {
+					inTable = true;
+					dataRowCount = 0;
+					output.push(line);
+					output.push(lines[i + 1]);
+					i++;
+					continue;
+				}
+			}
+			output.push(line);
+		} else {
+			if (isTableRow) {
+				dataRowCount++;
+				if (dataRowCount <= maxRows) {
+					output.push(line);
+				}
+			} else {
+				inTable = false;
+				dataRowCount = 0;
+				output.push(line);
+			}
+		}
+	}
+
+	return output.join("\n");
+}
+
 export function normalizeResearchPaperMarkdown(content: string): string {
 	return standardizeResearchSectionHeadings(
-		content
-			.replace(/^(\#{1,6}\s+)\*\*([^*\n]+)\*\*\s*$/gm, "**$2**")
-			.replace(/^(\#{1,6}\s+)\*([^*\n]+)\*\s*$/gm, "**$2**")
-			.replace(/^(\#{1,6}\s+)(.+?)\s*$/gm, "**$2**")
-			.replace(/^[\s]*(-{2,}|_{2,}|\*{2,})[\s]*$/gm, "")
-			.replace(/\n{3,}/g, "\n\n")
-			.trim(),
+		limitTableRowsInMarkdown(
+			content
+				.replace(/^(\#{1,6}\s+)\*\*([^*\n]+)\*\*\s*$/gm, "**$2**")
+				.replace(/^(\#{1,6}\s+)\*([^*\n]+)\*\s*$/gm, "**$2**")
+				.replace(/^(\#{1,6}\s+)(.+?)\s*$/gm, "**$2**")
+				.replace(/^[\s]*(-{2,}|_{2,}|\*{2,})[\s]*$/gm, "")
+				.replace(/\n{3,}/g, "\n\n")
+				.trim(),
+			10,
+		),
 	);
 }
 
@@ -68,31 +127,41 @@ function embedTitleLinkInReferenceLine(line: string): string {
 	working = working.replace(/https?:\/\/[^\s)\],]+/gi, "").replace(/\barXiv:\s*[\d.]+[a-z]?\b/gi, "");
 	working = working.replace(/[ \t]{2,}/g, " ").trim();
 
-	const numbered = working.match(/^(\d+\.\s+)([\s\S]+)$/);
+	const numbered = working.match(/^(\d+\.\s+|\[\d+\]\s+)([\s\S]+)$/);
 	const prefixNum = numbered?.[1] ?? "";
-	const body = numbered?.[2] ?? working;
+	const body = (numbered?.[2] ?? working).trim();
 
-	const afterYear = body.match(/^(.+?\(\d{4}[a-z]?\)\.\s+)([\s\S]+)$/);
-	if (!afterYear) {
-		const titleOnly = body.replace(/\*([^*]+)\*/g, "$1").replace(/\.\s*$/, "").trim();
-		if (!titleOnly) return finalizeReferenceLine(trimmed);
-		return finalizeReferenceLine(`${prefixNum}[*${titleOnly}*](${sourceUrl}).`);
+	// Quoted title: Author, "Title," Venue, Year or Author, 'Title', Venue
+	const quotedMatch = body.match(/^(.+?,\s*)(["“'])(.+?)(["”'])(.*)$/);
+	if (quotedMatch) {
+		const authorPart = quotedMatch[1]!;
+		const title = cleanReferenceTitle(quotedMatch[3]!);
+		const suffix = quotedMatch[5] ? stripArxivMeta(quotedMatch[5]).trim() : "";
+		const titleLink = `["${title}"](${sourceUrl})`;
+		const entry = `${prefixNum}${authorPart}${titleLink}${suffix ? (suffix.startsWith(",") || suffix.startsWith(".") ? suffix : ` ${suffix}`) : "."}`;
+		return finalizeReferenceLine(entry);
 	}
 
-	const authorPart = afterYear[1]!;
-	const remainder = afterYear[2]!.trim().replace(/\.\s*$/, "");
+	const afterYear = body.match(/^(.+?\(\d{4}[a-z]?\)\.?\s+)([\s\S]+)$/);
+	if (afterYear) {
+		const authorPart = afterYear[1]!;
+		const remainder = afterYear[2]!.trim().replace(/\.\s*$/, "");
+		const splitAtJournal = remainder.match(
+			/^(.+?)(\.\s+(?:In |Journal|Proceedings|Vol\.|Volume|pp\.|pp\s|doi:|DOI:|Retrieved|Available).*)$/i,
+		);
+		const title = (splitAtJournal?.[1] ?? remainder).replace(/\*([^*]+)\*/g, "$1").trim();
+		const suffix = splitAtJournal?.[2] ? stripArxivMeta(splitAtJournal[2]) : "";
+		if (title) {
+			const titleLink = `[*${title}*](${sourceUrl})`;
+			const entry = `${prefixNum}${authorPart}${titleLink}${suffix ? suffix : "."}`;
+			return finalizeReferenceLine(entry);
+		}
+		return finalizeReferenceLine(`${prefixNum}${authorPart}${remainder} [Source](${sourceUrl}).`);
+	}
 
-	const splitAtJournal = remainder.match(
-		/^(.+?)(\.\s+(?:In |Journal|Proceedings|Vol\.|Volume|pp\.|pp\s|doi:|DOI:|Retrieved|Available).*)$/i,
-	);
-	const title = (splitAtJournal?.[1] ?? remainder).replace(/\*([^*]+)\*/g, "$1").trim();
-	const suffix = splitAtJournal?.[2] ? stripArxivMeta(splitAtJournal[2]) : "";
-
-	if (!title) return finalizeReferenceLine(`${prefixNum}${authorPart}${remainder}.`);
-
-	const titleLink = `[*${title}*](${sourceUrl})`;
-	const entry = `${prefixNum}${authorPart}${titleLink}${suffix ? suffix : "."}`;
-	return finalizeReferenceLine(entry);
+	const titleOnly = body.replace(/\*([^*]+)\*/g, "$1").replace(/\.\s*$/, "").trim();
+	if (!titleOnly) return finalizeReferenceLine(trimmed);
+	return finalizeReferenceLine(`${prefixNum}${titleOnly} [Source](${sourceUrl}).`);
 }
 
 function formatReferencesBlock(section: string): string {

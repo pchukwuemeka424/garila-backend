@@ -1,3 +1,4 @@
+import { isHeadingOrHeaderLine, isReferenceEntryLine } from "./fact-check-citations.js";
 
 /** Highlight colours used in supervisor review annotations. */
 export const REVIEW_HIGHLIGHT_COLORS = {
@@ -5,6 +6,8 @@ export const REVIEW_HIGHLIGHT_COLORS = {
   weakness: "#fde047",
   /** Claims / statements that need an in-text citation. */
   citation: "#fdba74",
+  /** Contradictory, inaccurate, or unsubstantiated wrong claim. */
+  wrongClaim: "#fca5a5",
 } as const;
 
 /** Short warning labels shown on highlighted sentences. */
@@ -12,6 +15,7 @@ export const REVIEW_HIGHLIGHT_LABELS = {
   strength: "Strength",
   weakness: "Weakness",
   citation: "Claim needs in-text citation",
+  wrongClaim: "Wrong / unverified claim",
 } as const;
 
 export type ReviewHighlightKind = keyof typeof REVIEW_HIGHLIGHT_COLORS;
@@ -21,6 +25,7 @@ export type ReviewTextHighlights = {
   weaknesses?: string[];
   /** Passages that assert facts/claims without an in-text citation. */
   citations?: string[];
+  wrongClaims?: string[];
 };
 
 /** 0–100 scores for each review dimension. */
@@ -49,7 +54,7 @@ export function computeAreaScores(plainText: string): AreaScores {
   const sentences = plain
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter((s) => s.length >= 15 && !isHeadingOrHeaderLine(s));
   const avgSentenceLen =
     sentences.length > 0 ? wordCount / sentences.length : wordCount;
 
@@ -65,12 +70,12 @@ export function computeAreaScores(plainText: string): AreaScores {
   ).length;
   const vagueHits = (
     plain.match(
-      /\b(very|really|thing|stuff|a lot|interesting|important|good|bad)\b/gi,
+      /\b(very|really|thing|stuff|a lot|interesting|good|bad)\b/gi,
     ) || []
   ).length;
 
-  let strengths = 42;
-  if (wordCount >= 80) strengths += 12;
+  let strengths = 45;
+  if (wordCount >= 80) strengths += 10;
   if (wordCount >= 180) strengths += 10;
   if (wordCount >= 350) strengths += 8;
   strengths += Math.min(18, academicHits * 3);
@@ -79,15 +84,12 @@ export function computeAreaScores(plainText: string): AreaScores {
   if (avgSentenceLen > 38) strengths -= 6;
   if (avgSentenceLen < 8 && wordCount > 40) strengths -= 8;
 
-  let weaknesses = 28;
-  if (wordCount < 60) weaknesses += 30;
-  else if (wordCount < 120) weaknesses += 16;
-  if (citationHits === 0 && wordCount >= 80) weaknesses += 18;
+  let weaknesses = 20;
+  if (wordCount < 60) weaknesses += 25;
+  else if (wordCount < 120) weaknesses += 10;
+  if (citationHits === 0 && wordCount >= 80) weaknesses += 15;
   weaknesses += Math.min(16, vagueHits * 3);
-  if (avgSentenceLen > 40) weaknesses += 10;
-  if (academicHits < 2 && wordCount >= 100) weaknesses += 12;
-  if (sentences.length <= 2 && wordCount >= 80) weaknesses += 8;
-  weaknesses = Math.max(weaknesses - Math.floor(strengths / 8), 12);
+  if (avgSentenceLen > 40) weaknesses += 8;
 
   strengths = clampScore(strengths);
   weaknesses = clampScore(weaknesses);
@@ -129,132 +131,214 @@ export function stripReviewMarks(html: string) {
     .replace(/<\/?mark\b[^>]*>/gi, "");
 }
 
-function snapToWord(text: string, index: number, prefer: "start" | "end") {
-  if (index <= 0) return 0;
-  if (index >= text.length) return text.length;
-  if (/\s/.test(text[index] || "")) return index;
-  if (prefer === "start") {
-    const prev = text.lastIndexOf(" ", index);
-    return prev === -1 ? index : prev + 1;
-  }
-  const next = text.indexOf(" ", index);
-  return next === -1 ? text.length : next;
-}
-
 function splitSentences(plain: string): string[] {
   return plain
-    .split(/(?<=[.!?])\s+/)
+    .split(/(?<=[.!?])\s+|\r?\n+/)
     .map((s) => s.trim())
-    .filter((s) => s.length >= 20);
+    .filter(
+      (s) =>
+        s.length >= 20 &&
+        !isHeadingOrHeaderLine(s) &&
+        !isReferenceEntryLine(s),
+    );
 }
 
-/** Score a sentence for weakness signals (higher = more issue-like). */
+function hasInTextCitation(sentence: string) {
+  return /\((?:[^)]*\d{4}[^)]*)\)|\[\d+\]|\bet al\./i.test(sentence);
+}
+
 function sentenceIssueScore(sentence: string): number {
+  if (isHeadingOrHeaderLine(sentence) || isReferenceEntryLine(sentence)) {
+    return 0;
+  }
   let score = 0;
   const lower = sentence.toLowerCase();
   const words = sentence.split(/\s+/).filter(Boolean);
 
-  if (words.length > 35) score += 3;
-  if (words.length > 50) score += 2;
-  if (words.length < 8) score += 2;
+  if (words.length > 45) score += 2;
+  if (words.length < 6) score += 2;
 
   const vague =
     lower.match(
-      /\b(very|really|thing|stuff|a lot|interesting|important|good|bad|nice|maybe|somewhat|various|etc)\b/g,
+      /\b(very|really|thing|stuff|a lot|nice|maybe|somewhat|etc)\b/g,
     ) || [];
   score += Math.min(6, vague.length * 2);
 
   if (
-    /\b(however|but|although|despite|nevertheless|unfortunately|limited|lack|unclear|insufficient|weak|missing|fail|cannot|unable)\b/i.test(
+    /\b(completely unproven|unsubstantiated|obviously true|without any doubt|everyone knows)\b/i.test(
       sentence,
     )
   ) {
-    score += 4;
+    score += 5;
   }
 
+  if (words.length < 10 && !hasInTextCitation(sentence)) score += 1;
+
+  return score;
+}
+
+function sentenceStrengthScore(sentence: string): number {
+  if (isHeadingOrHeaderLine(sentence) || isReferenceEntryLine(sentence)) {
+    return 0;
+  }
+  let score = 0;
+  const words = sentence.split(/\s+/).filter(Boolean);
+  if (words.length >= 12 && words.length <= 42) score += 3;
+  if (hasInTextCitation(sentence)) score += 4;
   if (
-    /\b(should|need to|must|could be|would benefit|recommend|suggest|improve|clarify|expand|strengthen|further research)\b/i.test(
+    /\b(however|therefore|furthermore|moreover|consequently|in contrast|this suggests|the evidence|analysis|framework|hypothesis|argues that|demonstrates)\b/i.test(
       sentence,
     )
   ) {
     score += 3;
   }
-
-  if (!/\((?:[^)]*\d{4}[^)]*)\)|\[\d+\]|et al\./i.test(sentence) && words.length > 18) {
-    score += 2;
-  }
-
-  if (
-    /\b(this study|this paper|we argue|findings (show|indicate|suggest)|results (show|indicate))\b/i.test(
-      sentence,
-    )
-  ) {
-    score -= 2;
-  }
-
+  if (sentenceIssueScore(sentence) >= 4) score -= 5;
   return score;
 }
 
+function sentenceWrongClaimScore(sentence: string): number {
+  if (isHeadingOrHeaderLine(sentence) || isReferenceEntryLine(sentence)) {
+    return 0;
+  }
+  let score = 0;
+  if (
+    /\b(always|never|all|none|impossible|completely|without question|everyone knows|proves that|no exception|guarantee[sd]?)\b/i.test(
+      sentence,
+    )
+  ) {
+    score += 5;
+  }
+  if (/\b(100%|fails? less|superior to|the only way)\b/i.test(sentence)) {
+    score += 4;
+  }
+  return score;
+}
+
+function takeRanked(
+  items: Array<{ sentence: string; index: number; score: number }>,
+  used: Set<number>,
+  minScore: number,
+  limit: number,
+): string[] {
+  const out: string[] = [];
+  const ranked = [...items]
+    .filter((r) => !used.has(r.index) && r.score >= minScore)
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  for (const item of ranked) {
+    if (out.length >= limit) break;
+    out.push(item.sentence);
+    used.add(item.index);
+  }
+  return out;
+}
+
 /**
- * Produce Weakness and missing-citation excerpts across the document.
- * Strengths are not highlighted.
+ * Produce selective Strength, Weakness, Needs-citation, and Wrong-claim excerpts.
+ * Headings, titles, sub-headings, and reference list items are STRICTLY excluded.
  */
 export function pickFallbackHighlightQuotes(
   plainText: string,
 ): ReviewTextHighlights {
   const plain = normalizeWhitespace(plainText);
   if (plain.length < 24) {
-    return { strengths: [], weaknesses: [], citations: [] };
+    return { strengths: [], weaknesses: [], citations: [], wrongClaims: [] };
   }
 
   const sentences = splitSentences(plain);
-
   if (sentences.length === 0) {
-    const len = plain.length;
-    let t1 = snapToWord(plain, Math.floor(len / 2), "end");
-    if (t1 < 12) t1 = Math.floor(len / 2);
-    return {
-      strengths: [],
-      weaknesses: [plain.slice(0, t1).trim()].filter((s) => s.length >= 8),
-      citations: [],
-    };
+    return { strengths: [], weaknesses: [], citations: [], wrongClaims: [] };
   }
 
   const ranked = sentences.map((sentence, index) => ({
     sentence: sentence.slice(0, 280),
     index,
     issue: sentenceIssueScore(sentence),
+    strength: sentenceStrengthScore(sentence),
+    wrong: sentenceWrongClaimScore(sentence),
   }));
 
-  const weaknessCandidates = [...ranked]
-    .filter(
-      (r) => r.issue >= 3 || r.index >= Math.floor(sentences.length * 0.2),
-    )
-    .sort((a, b) => b.issue - a.issue || a.index - b.index);
-
-  const weaknesses: string[] = [];
   const used = new Set<number>();
-  for (const item of weaknessCandidates) {
-    if (weaknesses.length >= 8) break;
-    if (used.has(item.index)) continue;
-    weaknesses.push(item.sentence);
-    used.add(item.index);
-  }
-
-  if (weaknesses.length === 0 && sentences.length >= 1) {
-    const mid = sentences[Math.floor(sentences.length / 2)];
-    if (mid) weaknesses.push(mid.slice(0, 280));
-  }
-
+  const weaknesses = takeRanked(
+    ranked.map((r) => ({
+      sentence: r.sentence,
+      index: r.index,
+      score: r.issue,
+    })),
+    used,
+    3,
+    4,
+  );
+  const wrongClaims = takeRanked(
+    ranked.map((r) => ({
+      sentence: r.sentence,
+      index: r.index,
+      score: r.wrong,
+    })),
+    used,
+    5,
+    3,
+  );
   const citations = pickFallbackCitationQuotes(plain, used);
+  const strengths = takeRanked(
+    ranked.map((r) => ({
+      sentence: r.sentence,
+      index: r.index,
+      score: r.strength,
+    })),
+    used,
+    5,
+    3,
+  );
 
-  return { strengths: [], weaknesses, citations };
+  return { strengths, weaknesses, citations, wrongClaims };
 }
 
-/**
- * Find claim-like sentences that lack an in-text citation
- * (Author, Year) / [n] / et al.
- */
+export function hasReviewHighlightQuotes(
+  quotes: ReviewTextHighlights | null | undefined,
+): boolean {
+  if (!quotes) return false;
+  return (
+    (quotes.weaknesses?.length || 0) +
+      (quotes.citations?.length || 0) +
+      (quotes.wrongClaims?.length || 0) +
+      (quotes.strengths?.length || 0) >
+    0
+  );
+}
+
+export function quotesFromFactCheckClaims(
+  claims:
+    | Array<{ sentence?: string; status?: string }>
+    | null
+    | undefined,
+): ReviewTextHighlights {
+  const citations: string[] = [];
+  const wrongClaims: string[] = [];
+  for (const claim of claims || []) {
+    const sentence = normalizeWhitespace(String(claim.sentence || "")).slice(
+      0,
+      280,
+    );
+    if (
+      sentence.length < 8 ||
+      isHeadingOrHeaderLine(sentence) ||
+      isReferenceEntryLine(sentence)
+    ) {
+      continue;
+    }
+    if (claim.status === "needs_citation" && citations.length < 6) {
+      citations.push(sentence);
+    } else if (
+      (claim.status === "wrong_claim" ||
+        claim.status === "mismatched_citation") &&
+      wrongClaims.length < 4
+    ) {
+      wrongClaims.push(sentence);
+    }
+  }
+  return { strengths: [], weaknesses: [], citations, wrongClaims };
+}
+
 export function pickFallbackCitationQuotes(
   plainText: string,
   alreadyUsed: Set<number> = new Set(),
@@ -263,11 +347,10 @@ export function pickFallbackCitationQuotes(
   const sentences = splitSentences(plain);
   if (sentences.length === 0) return [];
 
-  const hasCitation = (sentence: string) =>
-    /\((?:[^)]*\d{4}[^)]*)\)|\[\d+\]|\bet al\./i.test(sentence);
+  const hasCitation = hasInTextCitation;
 
-  const looksLikeClaim = (sentence: string) =>
-    /\b(studies?|research|evidence|findings?|results?|literature|scholars?|authors?|data|statistics?|percent|%|significant|demonstrat\w+|show(?:s|ed|ing)?|indicat\w+|suggest\w+|report\w+|found that|according to|it is (?:known|clear|evident)|has been (?:shown|argued|reported))\b/i.test(
+  const looksLikeEmpiricalOrTheoreticalClaim = (sentence: string) =>
+    /\b(fail|compute|latency|throughput|performance|study|studies|experiment|survey|users?|students?|universit\w+|nigerian|african|platform|empirical|demonstrate|show|indicat\w+|prove|consensus|raft|paxos|partitioning|hashing|byzantine|cap theorem|replication|cost|minutes|hours)\b/i.test(
       sentence,
     ) || /\b\d{2,}\b/.test(sentence);
 
@@ -277,25 +360,28 @@ export function pickFallbackCitationQuotes(
       index,
       score:
         (!hasCitation(sentence) ? 4 : 0) +
-        (looksLikeClaim(sentence) ? 5 : 0) +
-        (sentence.split(/\s+/).length > 16 ? 1 : 0),
+        (looksLikeEmpiricalOrTheoreticalClaim(sentence) ? 5 : 0) +
+        (sentence.split(/\s+/).length > 12 ? 2 : 0),
     }))
-    .filter((r) => !alreadyUsed.has(r.index) && !hasCitation(r.sentence) && r.score >= 5)
+    .filter(
+      (r) =>
+        !alreadyUsed.has(r.index) &&
+        !hasCitation(r.sentence) &&
+        !isHeadingOrHeaderLine(r.sentence) &&
+        !isReferenceEntryLine(r.sentence) &&
+        r.score >= 6,
+    )
     .sort((a, b) => b.score - a.score || a.index - b.index);
 
   const citations: string[] = [];
   for (const item of ranked) {
-    if (citations.length >= 8) break;
+    if (citations.length >= 4) break;
     citations.push(item.sentence);
     alreadyUsed.add(item.index);
   }
   return citations;
 }
 
-/**
- * Merge quote sets, preferring Weaknesses and Citations coverage.
- * Strength quotes are dropped (not highlighted).
- */
 export function mergeHighlightQuotes(
   primary: ReviewTextHighlights | null | undefined,
   secondary: ReviewTextHighlights,
@@ -304,6 +390,7 @@ export function mergeHighlightQuotes(
     const out: string[] = [];
     const seen = new Set<string>();
     for (const item of items) {
+      if (isHeadingOrHeaderLine(item) || isReferenceEntryLine(item)) continue;
       const key = normalizeWhitespace(item).toLowerCase().slice(0, 80);
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -313,14 +400,21 @@ export function mergeHighlightQuotes(
   };
 
   return {
-    strengths: [],
+    strengths: uniq([
+      ...(primary?.strengths || []),
+      ...(secondary.strengths || []),
+    ]).slice(0, 4),
     weaknesses: uniq([
       ...(primary?.weaknesses || []),
       ...(secondary.weaknesses || []),
-    ]).slice(0, 10),
+    ]).slice(0, 4),
     citations: uniq([
       ...(primary?.citations || []),
       ...(secondary.citations || []),
-    ]).slice(0, 10),
+    ]).slice(0, 6),
+    wrongClaims: uniq([
+      ...(primary?.wrongClaims || []),
+      ...(secondary.wrongClaims || []),
+    ]).slice(0, 4),
   };
 }

@@ -10,6 +10,7 @@ import {
   computeAreaScores,
   parseAreaScores,
   mergeHighlightQuotes,
+  quotesFromFactCheckClaims,
 } from "../../lib/portal-review/apply-highlights.js";
 import {
   runAssignmentReviewPipeline,
@@ -18,6 +19,7 @@ import {
   outOfScopeRecommendedScore,
   buildOutOfScopeRemarks,
   fitRemarksToWordCount,
+  appendSectionRemarks,
   type AssignmentBriefContext,
   type AssignmentGateResult,
   type AssignmentMatchClassification,
@@ -429,14 +431,16 @@ async function enrichChapterPipelineWithLlm(
         : {};
 
     const localQuotes = {
-      strengths: [] as string[],
+      strengths: pipeline.highlightQuotes.strengths || [],
       weaknesses: pipeline.highlightQuotes.weaknesses || [],
       citations: pipeline.highlightQuotes.citations || [],
+      wrongClaims: pipeline.highlightQuotes.wrongClaims || [],
     };
     const aiQuotes = {
-      strengths: [] as string[],
+      strengths: asStringArray(quotesRaw.strengths, localQuotes.strengths),
       weaknesses: asStringArray(quotesRaw.weaknesses, localQuotes.weaknesses),
       citations: asStringArray(quotesRaw.citations, localQuotes.citations),
+      wrongClaims: asStringArray(quotesRaw.wrongClaims, localQuotes.wrongClaims),
     };
     const highlightQuotes = mergeHighlightQuotes(aiQuotes, localQuotes);
 
@@ -1120,7 +1124,13 @@ export const aiReviewService = {
     });
 
     const text = pipeline.stages.normalize.plainText;
-    const fallbackQuotes = pickFallbackHighlightQuotes(text);
+    const fallbackQuotes = mergeHighlightQuotes(
+      pipeline.highlightQuotes,
+      mergeHighlightQuotes(
+        quotesFromFactCheckClaims(pipeline.factCheckAudit?.claims),
+        pickFallbackHighlightQuotes(text),
+      ),
+    );
     let gate: AssignmentGateResult = pipeline.gate;
 
     const buildPipelineStages = (
@@ -1174,9 +1184,10 @@ export const aiReviewService = {
       strengths: pipeline.strengths,
       weaknesses: pipeline.weaknesses,
       highlightQuotes: {
-        strengths: [] as string[],
+        strengths: fallbackQuotes.strengths || [],
         weaknesses: fallbackQuotes.weaknesses || [],
         citations: fallbackQuotes.citations || [],
+        wrongClaims: fallbackQuotes.wrongClaims || [],
       },
       areaScores: {
         ...heuristicScores,
@@ -1207,6 +1218,7 @@ export const aiReviewService = {
       assignmentStatus: gate.classification,
       assignmentGate: buildAssignmentGatePayload(gate),
       markingSkipped: gate.shouldStopMarking,
+      factCheckAudit: pipeline.factCheckAudit,
       promptVersion: ASSIGNMENT_REVIEW_PROMPT_VERSION,
       pipelineStages: buildPipelineStages(
         gate,
@@ -1326,8 +1338,15 @@ export const aiReviewService = {
             ].slice(0, 8),
             highlightQuotes: {
               strengths: [] as string[],
-              weaknesses: fallbackQuotes.weaknesses || [],
+              weaknesses: (fallbackQuotes.weaknesses || []).slice(0, 2),
               citations: fallbackQuotes.citations || [],
+              wrongClaims: (pipeline.factCheckAudit?.claims || [])
+                .filter(
+                  (c) =>
+                    c.status === "wrong_claim" ||
+                    c.status === "mismatched_citation",
+                )
+                .map((c) => c.sentence),
             },
             areaScores: {
               ...heuristicScores,
@@ -1377,6 +1396,7 @@ export const aiReviewService = {
               },
             ),
             model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+            factCheckAudit: pipeline.factCheckAudit,
           };
         } else {
           const alignmentSummary = [
@@ -1436,15 +1456,20 @@ export const aiReviewService = {
               ? (markerParsed.aiContent as Record<string, unknown>)
               : {};
 
-          const highlightQuotes = {
-            strengths: [] as string[],
-            weaknesses: asStringArray(
-              quotesRaw.weaknesses,
-              fallbackQuotes.weaknesses || [],
-            ),
-            citations: fallbackQuotes.citations || [],
-          };
-          const quoteCount = highlightQuotes.weaknesses.length;
+          const highlightQuotes = mergeHighlightQuotes(
+            {
+              strengths: asStringArray(quotesRaw.strengths, []),
+              weaknesses: asStringArray(quotesRaw.weaknesses, []),
+              citations: asStringArray(quotesRaw.citations, []),
+              wrongClaims: asStringArray(quotesRaw.wrongClaims, []),
+            },
+            fallbackQuotes,
+          );
+          const quoteCount =
+            (highlightQuotes.strengths?.length || 0) +
+            (highlightQuotes.weaknesses?.length || 0) +
+            (highlightQuotes.citations?.length || 0) +
+            (highlightQuotes.wrongClaims?.length || 0);
 
           const areaScores = parseAreaScores(markerParsed.areaScores, {
             ...heuristicScores,
@@ -1577,11 +1602,31 @@ export const aiReviewService = {
               weaknesses: markerWeaknesses.slice(0, 8),
               highlightQuotes:
                 quoteCount > 0
-                  ? highlightQuotes
+                  ? {
+                      strengths: highlightQuotes.strengths || [],
+                      weaknesses: highlightQuotes.weaknesses || [],
+                      citations: highlightQuotes.citations || [],
+                      wrongClaims:
+                        (pipeline.factCheckAudit?.claims || [])
+                          .filter(
+                            (c) =>
+                              c.status === "wrong_claim" ||
+                              c.status === "mismatched_citation",
+                          )
+                          .map((c) => c.sentence),
+                    }
                   : {
                       strengths: [] as string[],
-                      weaknesses: fallbackQuotes.weaknesses || [],
+                      weaknesses: (fallbackQuotes.weaknesses || []).slice(0, 2),
                       citations: fallbackQuotes.citations || [],
+                      wrongClaims:
+                        (pipeline.factCheckAudit?.claims || [])
+                          .filter(
+                            (c) =>
+                              c.status === "wrong_claim" ||
+                              c.status === "mismatched_citation",
+                          )
+                          .map((c) => c.sentence),
                     },
               areaScores: {
                 ...areaScores,
@@ -1641,6 +1686,7 @@ export const aiReviewService = {
                 },
               ),
               model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+              factCheckAudit: pipeline.factCheckAudit,
             };
           } else {
             let aiSuggestedScore =
@@ -1697,11 +1743,31 @@ export const aiReviewService = {
               areaScores,
               highlightQuotes:
                 quoteCount > 0
-                  ? highlightQuotes
+                  ? {
+                      strengths: highlightQuotes.strengths || [],
+                      weaknesses: highlightQuotes.weaknesses || [],
+                      citations: highlightQuotes.citations || [],
+                      wrongClaims:
+                        (pipeline.factCheckAudit?.claims || [])
+                          .filter(
+                            (c) =>
+                              c.status === "wrong_claim" ||
+                              c.status === "mismatched_citation",
+                          )
+                          .map((c) => c.sentence),
+                    }
                   : {
                       strengths: [] as string[],
-                      weaknesses: fallbackQuotes.weaknesses || [],
+                      weaknesses: (fallbackQuotes.weaknesses || []).slice(0, 2),
                       citations: fallbackQuotes.citations || [],
+                      wrongClaims:
+                        (pipeline.factCheckAudit?.claims || [])
+                          .filter(
+                            (c) =>
+                              c.status === "wrong_claim" ||
+                              c.status === "mismatched_citation",
+                          )
+                          .map((c) => c.sentence),
                     },
               aiContent: {
                 detected: aiDetected,
@@ -1746,6 +1812,7 @@ export const aiReviewService = {
                 },
               ),
               model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+              factCheckAudit: pipeline.factCheckAudit,
             };
           }
         }
@@ -1757,9 +1824,25 @@ export const aiReviewService = {
           markingSkipped: pipeline.gate.shouldStopMarking,
           promptVersion: ASSIGNMENT_REVIEW_PROMPT_VERSION,
           model: "assignment-pipeline-fallback",
+          factCheckAudit: pipeline.factCheckAudit,
         };
       }
     }
+
+    result.remarksSummary = appendSectionRemarks(
+      result.remarksSummary,
+      pipeline.sectionRemarks,
+    );
+    const mergedQuotes = mergeHighlightQuotes(
+      result.highlightQuotes,
+      fallbackQuotes,
+    );
+    result.highlightQuotes = {
+      strengths: mergedQuotes.strengths || [],
+      weaknesses: mergedQuotes.weaknesses || [],
+      citations: mergedQuotes.citations || [],
+      wrongClaims: mergedQuotes.wrongClaims || [],
+    };
 
     if (isSinglePageProjectType(String(project.projectType))) {
       project.set("aiSuggestedScore", result.aiSuggestedScore);
@@ -1769,6 +1852,7 @@ export const aiReviewService = {
         remarksSummary: result.remarksSummary,
         strengths: result.strengths,
         weaknesses: result.weaknesses,
+        highlightQuotes: result.highlightQuotes,
         aiContent: result.aiContent,
         aiSuggestedScore: result.aiSuggestedScore,
         maxScore: result.maxScore,
@@ -1786,8 +1870,35 @@ export const aiReviewService = {
         pipelineStages: result.pipelineStages,
         model: result.model,
         pageId: String(page._id),
+        factCheckAudit: result.factCheckAudit || pipeline.factCheckAudit,
       });
       project.set("aiReviewedAt", new Date());
+
+      // Auto-save assignment score and rubric criteria so marks are immediately persistent
+      if (typeof result.aiSuggestedScore === "number") {
+        project.set("score", result.aiSuggestedScore);
+        project.set("scoreSource", "ai_approved");
+        project.set("scoredAt", new Date());
+        project.set("scoredBy", supervisorId);
+        if (Array.isArray(result.criterionScores) && result.criterionScores.length > 0) {
+          project.set(
+            "criterionScores",
+            result.criterionScores.map((c) => ({
+              name: c.name,
+              score: Math.round(c.score),
+              maxMarks: c.maxMarks,
+            })),
+          );
+        }
+      }
+
+      if (result.remarksSummary) {
+        page.set("reviewRemark", result.remarksSummary);
+        page.set("reviewedAt", new Date());
+        page.set("reviewedBy", supervisorId);
+        project.markModified("pages");
+      }
+
       await project.save();
     }
 
@@ -1958,7 +2069,8 @@ export const aiReviewService = {
 
     project.set("aiReviewSnapshot", {
       ...result,
-      highlightQuotes: undefined,
+      highlightQuotes: result.highlightQuotes,
+      pageId: String(page._id),
     });
     project.set("aiReviewedAt", new Date());
     project.set("aiGeneratedPercent", pipeline.aiContent.percent);

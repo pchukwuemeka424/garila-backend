@@ -45,6 +45,8 @@ export type ScoreAssignmentInput = {
 	score?: number;
 	acceptAiScore?: boolean;
 	scoreNote?: string;
+	remark?: string;
+	annotatedHtml?: string;
 	criterionScores?: Array<{ name: string; score: number; maxMarks: number }>;
 };
 

@@ -11,6 +11,7 @@ import {
 	literatureBankFetchLimit,
 	parseScopeFromPrompt,
 } from "../lib/research-scope-profiles.js";
+import { fitChatToModelContext } from "../lib/chat-context-budget.js";
 import {
 	buildLiteratureSearchQuery,
 	buildPaperSearchContext,
@@ -20,7 +21,7 @@ import {
 	type RetrievalProtocol,
 } from "./alphaxiv.service.js";
 import { alignCitationsAndFactCheck } from "./citation-align.service.js";
-import { parseCitationStyleLabel } from "../lib/citation-bank.js";
+import { isNumberedCitationStyle, parseCitationStyleLabel } from "../lib/citation-bank.js";
 import { evaluatePolicy } from "./admin-policy.service.js";
 import type { TokenUsage } from "../types/token-usage.js";
 import { streamOpenRouterChat, type ChatTurn } from "./llm.service.js";
@@ -177,6 +178,17 @@ export class ChatService {
 				) ||
 				"journal";
 			const profile = getScopeProfile(scope);
+			const hasNotebookLibrary =
+				/Selected research library|RESEARCH NOTEBOOK LIBRARY|NOTEBOOK PAGE:/i.test(
+					options.userMessage || "",
+				);
+			// Notebook evidence already consumes a large share of the window — fetch a smaller bank.
+			const fetchLimit = hasNotebookLibrary
+				? Math.min(24, literatureBankFetchLimit(scope))
+				: literatureBankFetchLimit(scope);
+			const minDistinctCites = hasNotebookLibrary
+				? Math.min(profile.minDistinctCites, 24)
+				: profile.minDistinctCites;
 			const healthHint = [
 				options.userMessage,
 				options.topic,
@@ -187,10 +199,10 @@ export class ChatService {
 			const result = await buildPaperSearchContext(query, {
 				signal: this.abortController?.signal,
 				scope,
-				minDistinctCites: profile.minDistinctCites,
+				minDistinctCites,
 				healthHint,
 				citationStyle: parseCitationStyleLabel(options.userMessage),
-				...(isChatPaper ? { limit: literatureBankFetchLimit(scope) } : {}),
+				...(isChatPaper ? { limit: fetchLimit } : {}),
 			});
 
 			this.emit({
@@ -224,10 +236,43 @@ export class ChatService {
 													? "AlphaXiv MCP literature retrieval"
 													: "AlphaXiv literature retrieval";
 			const contextBlock = `[${retrievalLabel}]\n\n${result.context}`;
+			const styleLabel = parseCitationStyleLabel(options.userMessage);
+			const isNumbered = isNumberedCitationStyle(styleLabel);
+			const inTextFormInstruction = isNumbered
+				? "IN-TEXT CITES (hard): Use ONLY numbered bracket USE THIS CITE forms like [1], [2], [1, 2]. Never write author–year parentheticals like (Author, Year)."
+				: "IN-TEXT CITES (hard): Use ONLY bracket/parenthetical USE THIS CITE forms like (Author, Year) or (Author et al., Year) matching the reference style. Never write narrative Author (Year) outside brackets.";
+			const assignmentCiteHardening =
+				scope === "assignment"
+					? [
+							"",
+							"[Assignment citation hardening — mandatory]",
+							inTextFormInstruction,
+							"Put a bank cite on nearly every body paragraph from Introduction through Conclusion.",
+							"EARLY CITES (hard): The first body paragraph after **Introduction** must include at least one bank cite before you continue. Do not write a long uncited opening.",
+							"Each major section (Introduction, Literature Review / themes, Critical Analysis or brief-named parts, Conclusion) must open with a cited paragraph and keep bank citations throughout — Conclusion must cite too.",
+							"Do not write long uncited paragraphs.",
+							`Cite at least ${profile.minDistinctCites} distinct bank papers in-text when the bank has that many; every References entry must appear in the body.`,
+							"Copy USE THIS CITE strings exactly. Cite a paper only when its abstract supports the claim’s field (e.g. education/HE claims need education evidence — not finance, clinical, or unrelated domains).",
+							"Omit statistics, percentages, sample sizes, and country/institution claims that are not in the cited abstract.",
+						].join("\n")
+					: "";
+			const userText = options.userMessage || "";
+			const notebookHardening =
+				isChatPaper &&
+				/Selected research library|RESEARCH NOTEBOOK LIBRARY|NOTEBOOK PAGE:/i.test(userText)
+					? [
+							"",
+							"[Selected research notebook — mandatory]",
+							"The user selected a research notebook library. Treat notebook notes, lab entries, documents, datasets, surveys, and figure metadata as primary study evidence for Methods, Results/Findings, Discussion of evidence, and contribution claims.",
+							"Use the literature retrieval bank for Literature Review / Theoretical Framework and in-text citations — do not replace notebook evidence with a generic literature-only paper.",
+							"Do not invent a different topic, population, dataset, or findings that ignore or contradict the selected notebook.",
+							"Use only values present in the notebook library for numeric tables and reported findings.",
+						].join("\n")
+					: "";
 			const systemIndex = history.findIndex((turn) => turn.role === "system");
 			if (systemIndex < 0) return history;
 
-			const updatedSystem = `${history[systemIndex]!.content}\n\n${contextBlock}`;
+			const updatedSystem = `${history[systemIndex]!.content}\n\n${contextBlock}${assignmentCiteHardening}${notebookHardening}`;
 			await MessageModel.findOneAndUpdate(
 				{ sessionId: this.sessionId!, role: "system" },
 				{ content: updatedSystem },
@@ -335,11 +380,12 @@ export class ChatService {
 				) ||
 				"journal";
 			const profile = getScopeProfile(scopeFromHistory);
-			const maxTokens =
+			const requestedMaxTokens =
 				session?.workflow === "chat-paper" ? profile.maxTokens : undefined;
-			const { text, usage } = await streamOpenRouterChat(llmHistory, {
+			const fitted = fitChatToModelContext(llmHistory, requestedMaxTokens);
+			const { text, usage } = await streamOpenRouterChat(fitted.messages as ChatTurn[], {
 				signal: this.abortController.signal,
-				maxTokens,
+				maxTokens: fitted.maxTokens,
 				onDelta: (delta) => {
 					this.emit({
 						type: "agent_event",
@@ -362,6 +408,7 @@ export class ChatService {
 						signal: this.abortController?.signal,
 						protocol: this.literatureProtocol,
 						topic: session?.topic ?? trimmed,
+						scope: scopeFromHistory,
 					},
 				);
 			}

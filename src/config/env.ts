@@ -77,6 +77,24 @@ export function getAuthSecret(): string {
 	return "feynman-dev-auth-secret-change-in-production";
 }
 
+/** Public web app origin used in password-reset emails (no trailing slash). */
+export function getAppUrl(): string {
+	const configured = process.env.APP_URL?.trim() || process.env.FRONTEND_URL?.trim();
+	if (configured) return configured.replace(/\/$/, "");
+	if (process.env.NODE_ENV === "production") {
+		return "https://garilai.com";
+	}
+	return "http://localhost:3000";
+}
+
+export function getResendApiKey(): string | null {
+	return process.env.RESEND_API_KEY?.trim() || null;
+}
+
+export function getMailFrom(): string {
+	return process.env.MAIL_FROM?.trim() || "Garil AI <noreply@garilai.com>";
+}
+
 export function getAlphaXivApiBase(): string {
 	return process.env.ALPHAXIV_API_BASE?.trim() || "https://api.alphaxiv.org";
 }

@@ -38,6 +38,9 @@ export const GOVERNANCE_FEATURES = [
 	"governance_hub",
 	"sessions",
 	"backup",
+	"modules",
+	"supervision",
+	"assessment",
 ] as const;
 
 export type GovernanceFeature = (typeof GOVERNANCE_FEATURES)[number];
@@ -50,6 +53,8 @@ const userSchema = new Schema(
 		name: { type: String, required: true, trim: true },
 		email: { type: String, required: true, unique: true, trim: true, lowercase: true },
 		passwordHash: { type: String, select: false },
+		passwordResetTokenHash: { type: String, select: false },
+		passwordResetExpires: { type: Date, select: false },
 		department: { type: String, trim: true },
 		institution: { type: String, trim: true },
 		universityId: { type: Schema.Types.ObjectId, ref: "University", index: true },
@@ -120,6 +125,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, Record<string, FeatureActi
 		contributions: ["view"],
 		provenance: ["view"],
 		governance_hub: ["view"],
+		modules: ["view", "edit"],
+		supervision: ["view", "edit"],
+		assessment: ["view", "edit"],
 	},
 	department_admin: {
 		dashboard: ["view"],
@@ -128,6 +136,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, Record<string, FeatureActi
 		tokens: ["view"],
 		contributions: ["view"],
 		governance_hub: ["view"],
+		supervision: ["view"],
+		assessment: ["view"],
 	},
 	data_protection_officer: {
 		dashboard: ["view"],
@@ -163,5 +173,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, Record<string, FeatureActi
 		inventory: ["view"],
 		approvals: ["view"],
 		governance_hub: ["view"],
+		modules: ["view"],
+		supervision: ["view"],
+		assessment: ["view"],
 	},
 };

@@ -140,6 +140,78 @@ export function paperHasSection(content: string, section: string): boolean {
 	return HAS_SECTION(section).test(content);
 }
 
+/**
+ * Strips duplicate or redundant paper title lines appearing at the very top of
+ * the manuscript before the Abstract (or first canonical section).
+ */
+export function stripTitleAboveAbstract(content: string, fallbackTitle?: string): string {
+	if (!content || !content.trim()) return "";
+
+	const lines = content.replace(/\r/g, "").split("\n");
+	let firstSectionIndex = -1;
+
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i]!.trim();
+		if (!trimmed) continue;
+
+		const boldMatch = trimmed.match(/^\*\*([^*\n]+?)\*\*\s*:?\s*$/);
+		const hashMatch = trimmed.match(/^#{1,6}\s+(.+?)\s*$/);
+		const plainMatch = trimmed.match(
+			/^(Abstract|Summary|Executive summary|Keywords|Study area|Introduction|Chapter One|Literature Review|Methodology|Methods|Results|Discussion|Conclusion|References)\b/i,
+		);
+
+		const candidate = (
+			boldMatch?.[1] ??
+			hashMatch?.[1] ??
+			(plainMatch ? plainMatch[0] : "")
+		)
+			.replace(/:+\s*$/, "")
+			.trim();
+		if (candidate) {
+			const canonical = canonicalizeSectionTitle(candidate);
+			if (
+				canonical ||
+				/^abstract$/i.test(candidate) ||
+				/^introduction$/i.test(candidate) ||
+				/^chapter\s+one/i.test(candidate) ||
+				/^executive\s+summary/i.test(candidate) ||
+				/^summary$/i.test(candidate)
+			) {
+				firstSectionIndex = i;
+				break;
+			}
+		}
+	}
+
+	if (firstSectionIndex >= 0) {
+		const beforeLines = lines.slice(0, firstSectionIndex);
+		const afterLines = lines.slice(firstSectionIndex);
+
+		const preservedBefore = beforeLines.filter((l) => {
+			const t = l.trim();
+			return t.startsWith("@@RESEARCH_VISUAL_") || t.startsWith("```");
+		});
+
+		return [...preservedBefore, ...afterLines].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	}
+
+	const nonEmpty = lines.map((l) => l.trim()).filter(Boolean);
+	if (nonEmpty.length <= 2) {
+		const first = nonEmpty[0] ?? "";
+		const cleanFirst = first.replace(/^#+\s*/, "").replace(/\*\*/g, "").trim();
+		const isTitleLike =
+			first.startsWith("#") ||
+			first.startsWith("**") ||
+			(fallbackTitle &&
+				cleanFirst.toLowerCase().includes(fallbackTitle.toLowerCase().slice(0, 20)));
+		if (isTitleLike) {
+			return "";
+		}
+	}
+
+	return content;
+}
+
 /** Strip arXiv metadata without collapsing paragraph breaks between sections. */
 export function stripArxivMetaPreserveLayout(text: string): string {
 	return text

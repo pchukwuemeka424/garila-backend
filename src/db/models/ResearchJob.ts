@@ -13,6 +13,8 @@ const researchJobSchema = new Schema(
 		},
 		savedResearchId: { type: Schema.Types.ObjectId, ref: "SavedResearch" },
 		figureDocumentIds: { type: [String], default: [] },
+		/** Canonical dataset tables + research-chart fences to inject after save. */
+		visualizationMarkdown: { type: String, default: "" },
 		sources: {
 			documentIds: { type: [String], default: [] },
 			datasetIds: { type: [String], default: [] },
@@ -22,6 +24,8 @@ const researchJobSchema = new Schema(
 		},
 		error: { type: String },
 		progress: { type: Number, default: 0, min: 0, max: 100 },
+		/** Live partial paper text while the model streams. */
+		draftContent: { type: String, default: "" },
 		notifiedAt: { type: Date },
 	},
 	{ timestamps: true },

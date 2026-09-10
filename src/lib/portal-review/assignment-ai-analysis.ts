@@ -1,3 +1,18 @@
+import {
+  analyzeDocumentClaimsAndCitations,
+  type FactCheckAuditReport,
+} from "./fact-check-citations.js";
+import {
+  mergeHighlightQuotes,
+  pickFallbackHighlightQuotes,
+  quotesFromFactCheckClaims,
+  type ReviewTextHighlights,
+} from "./apply-highlights.js";
+import {
+  buildSectionReviewNotes,
+  formatSectionReviewRemarks,
+} from "./section-review-remarks.js";
+
 /**
  * Assignment AI grading against lecturer brief:
  * instructions, must-include items, rubric, word count, and quality.
@@ -834,6 +849,9 @@ export type AssignmentReviewPipelineResult = {
   gate: AssignmentGateResult;
   assignmentStatus: AssignmentMatchClassification;
   markingSkipped: boolean;
+  factCheckAudit: FactCheckAuditReport;
+  highlightQuotes: ReviewTextHighlights;
+  sectionRemarks: string;
 };
 
 const STOP_WORDS = new Set([
@@ -1454,6 +1472,18 @@ export function fitRemarksToWordCount(
   return kept.join("\n\n").trim();
 }
 
+/** Append the section annotation block without shrinking the 200-word prose. */
+export function appendSectionRemarks(
+  prose: string,
+  sectionRemarks?: string,
+): string {
+  const p = String(prose || "").trim();
+  const s = String(sectionRemarks || "").trim();
+  if (!s) return p;
+  if (p.includes("Section-by-section review")) return p;
+  return [p, s].filter(Boolean).join("\n\n");
+}
+
 /**
  * Build lecturer-facing remarks as continuous academic prose (~200 words).
  */
@@ -1891,6 +1921,35 @@ export function runAssignmentReviewPipeline(opts: {
     gate,
   });
 
+  const factCheckAudit = analyzeDocumentClaimsAndCitations(
+    normalize.plainText,
+    opts.brief.topic,
+  );
+
+  const highlightQuotes = mergeHighlightQuotes(
+    quotesFromFactCheckClaims(factCheckAudit.claims),
+    pickFallbackHighlightQuotes(normalize.plainText),
+  );
+
+  const missingRequirements = instructionCompliance.requirementChecks
+    .filter((c) => !c.met)
+    .map((c) => c.item);
+
+  const sectionRemarks = formatSectionReviewRemarks(
+    buildSectionReviewNotes({
+      htmlOrText: opts.htmlOrText,
+      quotes: highlightQuotes,
+      factCheck: factCheckAudit,
+      missingRequirements,
+      strengths: feedback.strengths,
+      weaknesses: feedback.weaknesses,
+    }),
+  );
+
+  const remarksSummary = [feedback.remarksSummary, sectionRemarks]
+    .filter((part) => part && part.trim())
+    .join("\n\n");
+
   return {
     stages: {
       normalize,
@@ -1911,7 +1970,7 @@ export function runAssignmentReviewPipeline(opts: {
     estimatedGrade: feedback.estimatedGrade,
     projectTopic: opts.brief.topic,
     executiveSummary: feedback.executiveSummary,
-    remarksSummary: feedback.remarksSummary,
+    remarksSummary,
     strengths: feedback.strengths,
     weaknesses: feedback.weaknesses,
     supervisorRecommendation: feedback.supervisorRecommendation,
@@ -1919,5 +1978,8 @@ export function runAssignmentReviewPipeline(opts: {
     gate,
     assignmentStatus: gate.classification,
     markingSkipped: gate.shouldStopMarking,
+    factCheckAudit,
+    highlightQuotes,
+    sectionRemarks,
   };
 }

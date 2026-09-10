@@ -19,6 +19,13 @@ import type {
   ScoreAssignmentInput,
   UpdatePageInput,
 } from "./portal-dto.js";
+import {
+  backfillPageReviewTrail,
+  countWordsFromHtml,
+  pushPageReviewTrail,
+  serializeReviewTrail,
+  slimReviewTrailForList,
+} from "../../lib/portal-review/review-trail.js";
 
 function serializeBrief(brief: unknown) {
   if (!brief) return null;
@@ -49,6 +56,9 @@ function serializeProject(project: unknown) {
   const sections = doc.sections;
   if (sections instanceof Map) {
     obj.sections = Object.fromEntries(sections.entries());
+  }
+  if (Array.isArray(obj.pages)) {
+    obj.pages = slimReviewTrailForList(obj.pages) as typeof obj.pages;
   }
   return obj;
 }
@@ -495,6 +505,11 @@ export const projectService = {
     const page = project.pages?.id(pageId);
     if (!page) throw new NotFoundError("Page not found");
 
+    if (backfillPageReviewTrail(page)) {
+      project.markModified("pages");
+      await project.save();
+    }
+
     const [enriched] = await this.enrichWithStudents(tenantId, [project]);
     const [withBrief] = await this.enrichWithBriefs(tenantId, [enriched]);
     const pageObj =
@@ -547,6 +562,7 @@ export const projectService = {
       page: {
         ...pageObj,
         _id: String(page._id),
+        reviewTrail: serializeReviewTrail(page),
       },
       pages: [...(project.pages || [])]
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
@@ -726,12 +742,27 @@ export const projectService = {
 
     const note = (input.scoreNote || "").trim();
     project.set("score", finalScore);
-    project.set("scoreNote", note);
+    project.set("scoreNote", note.slice(0, 8_000));
     project.set("scoredAt", new Date());
     project.set("scoredBy", supervisorId);
     project.set("scoreSource", scoreSource);
     if (criterionScores.length > 0) {
       project.set("criterionScores", criterionScores);
+    }
+
+    const remark = (input.remark || "").trim();
+    if (remark || input.annotatedHtml) {
+      const pages = Array.isArray(project.pages) ? project.pages : [];
+      const page = pages[0];
+      if (page) {
+        if (remark) page.set("reviewRemark", remark.slice(0, 50_000));
+        if (typeof input.annotatedHtml === "string" && input.annotatedHtml.trim()) {
+          page.set("reviewAnnotatedHtml", input.annotatedHtml);
+        }
+        page.set("reviewedAt", new Date());
+        page.set("reviewedBy", supervisorId);
+        project.markModified("pages");
+      }
     }
     await project.save();
 
@@ -800,13 +831,29 @@ export const projectService = {
       );
     }
 
+    const contentSnapshot = String(page.content || "");
+    const annotatedSnapshot =
+      typeof input.annotatedHtml === "string"
+        ? input.annotatedHtml
+        : String(page.reviewAnnotatedHtml || page.content || "");
+    const reviewedAt = new Date();
+
     page.set("reviewStatus", input.action === "approve" ? "approved" : "needs_revision");
     page.set("reviewRemark", remark);
     if (typeof input.annotatedHtml === "string") {
       page.set("reviewAnnotatedHtml", input.annotatedHtml);
     }
-    page.set("reviewedAt", new Date());
+    page.set("reviewedAt", reviewedAt);
     page.set("reviewedBy", supervisorId);
+    pushPageReviewTrail(page, {
+      type: input.action === "approve" ? "approved" : "rewrite_requested",
+      at: reviewedAt,
+      actorId: supervisorId,
+      remark,
+      contentHtml: contentSnapshot,
+      annotatedHtml: annotatedSnapshot,
+      wordCount: countWordsFromHtml(contentSnapshot || annotatedSnapshot),
+    });
     project.markModified("pages");
     await project.save();
 
@@ -828,6 +875,7 @@ export const projectService = {
               tenantId,
               String(matched._id),
               supervisorId,
+              { skipPageTrail: true },
             );
           } else if (
             matched.status !== "approved" &&
@@ -848,6 +896,10 @@ export const projectService = {
             String(matched._id),
             remark,
             true,
+            typeof input.annotatedHtml === "string"
+              ? input.annotatedHtml
+              : undefined,
+            { skipPageTrail: true, actorId: supervisorId },
           );
         }
       } catch {

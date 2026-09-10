@@ -26,12 +26,20 @@ import { aiReviewService } from "../services/portal/portal-ai.service.js";
 import { aiChatService } from "../services/portal/portal-chat.service.js";
 import { userRepository } from "../services/portal/portal-users.js";
 import { deductStudentTokens } from "../services/student-token.service.js";
+import { assertUniversityFeature } from "../lib/assert-university-feature.js";
+import { UniversityFeatureDisabledError } from "../lib/university-features.js";
 
 function ok(reply: FastifyReply, data: unknown, status = 200) {
 	return reply.code(status).send({ success: true, data });
 }
 
 function fail(reply: FastifyReply, error: unknown) {
+	if (error instanceof UniversityFeatureDisabledError) {
+		return reply.code(403).send({
+			success: false,
+			error: { code: "MODULE_DISABLED", message: error.message },
+		});
+	}
 	if (error instanceof AppError) {
 		return reply.code(error.statusCode).send({
 			success: false,
@@ -49,6 +57,26 @@ async function actorOf(request: FastifyRequest): Promise<PortalActor> {
 	return requirePortalActor(request.headers.authorization);
 }
 
+async function assertPortalModulesForActor(
+	actor: PortalActor,
+	kind: "supervision" | "assessment" | "either",
+) {
+	if (kind === "assessment") {
+		await assertUniversityFeature(actor.universityId, "studentAssessment");
+		return;
+	}
+	if (kind === "supervision") {
+		await assertUniversityFeature(actor.universityId, "supervisionAssistant");
+		return;
+	}
+	try {
+		await assertUniversityFeature(actor.universityId, "supervisionAssistant");
+	} catch (err) {
+		if (!(err instanceof UniversityFeatureDisabledError)) throw err;
+		await assertUniversityFeature(actor.universityId, "studentAssessment");
+	}
+}
+
 function asProjectType(value: unknown): ProjectType {
 	if (typeof value === "string" && (PROJECT_TYPE_VALUES as string[]).includes(value)) {
 		return value as ProjectType;
@@ -61,6 +89,7 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 		try {
 			const actor = await actorOf(request);
 			requireStudent(actor);
+			await assertPortalModulesForActor(actor, "either");
 			const universityId = actor.universityId;
 			const [university, supervisors] = await Promise.all([
 				userRepository.getUniversity(universityId),
@@ -89,6 +118,11 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 		try {
 			const actor = await actorOf(request);
 			const query = request.query as { type?: string };
+			if (query.type === "assignment") {
+				await assertPortalModulesForActor(actor, "assessment");
+			} else {
+				await assertPortalModulesForActor(actor, "either");
+			}
 			if (isStudentRole(actor.role)) {
 				return ok(reply, await projectService.listForStudent(actor.tenantId, actor.userId));
 			}
@@ -120,6 +154,10 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 			const title = String(body.title || "").trim();
 			if (title.length < 3) throw new ValidationError("Title is required");
 			const projectType = asProjectType(body.projectType);
+			await assertPortalModulesForActor(
+				actor,
+				isSinglePageProjectType(projectType) ? "assessment" : "supervision",
+			);
 			const supervisorId = String(body.supervisorId || "");
 			if (!/^[a-f\d]{24}$/i.test(supervisorId)) {
 				throw new ValidationError("Select a supervisor");
@@ -393,6 +431,8 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 				score?: number;
 				acceptAiScore?: boolean;
 				scoreNote?: string;
+				remark?: string;
+				annotatedHtml?: string;
 				criterionScores?: Array<{ name: string; score: number; maxMarks: number }>;
 			};
 			return ok(
@@ -605,6 +645,7 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 						reason,
 						body.needsRevision !== false,
 						body.annotatedHtml,
+						{ actorId: actor.userId },
 					),
 				);
 			} catch (error) {
@@ -714,6 +755,7 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 	app.get("/api/portal/assignment-briefs", async (request, reply) => {
 		try {
 			const actor = await actorOf(request);
+			await assertPortalModulesForActor(actor, "assessment");
 			const query = request.query as {
 				lecturerId?: string;
 				courseYear?: string;
@@ -746,6 +788,7 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 		try {
 			const actor = await actorOf(request);
 			requireSupervisor(actor);
+			await assertPortalModulesForActor(actor, "assessment");
 			const body = (request.body ?? {}) as Record<string, unknown>;
 			const title = String(body.title || "").trim();
 			if (title.length < 3) throw new ValidationError("Title is required");

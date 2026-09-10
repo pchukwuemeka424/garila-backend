@@ -1,5 +1,18 @@
 import { Schema, model, type InferSchemaType, type Types } from "mongoose";
 
+import { DEFAULT_UNIVERSITY_FEATURES } from "../../lib/university-features.js";
+
+const universityFeaturesSchema = new Schema(
+	{
+		researchAssistant: { type: Boolean, default: true },
+		researchNotebook: { type: Boolean, default: true },
+		studentAssessment: { type: Boolean, default: true },
+		supervisionAssistant: { type: Boolean, default: true },
+		advancedResearch: { type: Boolean, default: true },
+	},
+	{ _id: false },
+);
+
 const universitySchema = new Schema(
 	{
 		catalogueId: { type: String, required: true, unique: true, trim: true, lowercase: true },
@@ -18,6 +31,11 @@ const universitySchema = new Schema(
 		defaultStudentTokens: { type: Number, min: 0, default: null },
 		/** Default research-token allowance for lecturers/researchers (null = platform default). */
 		defaultLecturerTokens: { type: Number, min: 0, default: null },
+		/** Product modules enabled for this tenant (missing keys default on). */
+		features: {
+			type: universityFeaturesSchema,
+			default: () => ({ ...DEFAULT_UNIVERSITY_FEATURES }),
+		},
 		onboardedAt: { type: Date },
 		onboardedBy: { type: Schema.Types.ObjectId, ref: "User" },
 	},

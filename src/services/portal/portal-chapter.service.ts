@@ -15,6 +15,12 @@ import type {
   AddChapterInput,
   SaveChapterDraftInput,
 } from "./portal-dto.js";
+import {
+  backfillPageReviewTrail,
+  countWordsFromHtml,
+  pushPageReviewTrail,
+  serializeReviewTrail,
+} from "../../lib/portal-review/review-trail.js";
 
 const SUBMITTABLE: ChapterStatus[] = [
   ChapterStatus.Draft,
@@ -200,6 +206,8 @@ export const chapterService = {
 
     chapter.status = ChapterStatus.Submitted;
     chapter.currentVersionId = version._id;
+    chapter.reviewAnnotatedHtml = "";
+    chapter.markModified("reviewAnnotatedHtml");
     await chapter.save();
 
     const review = await aiReviewService.enqueue(
@@ -209,6 +217,44 @@ export const chapterService = {
 
     chapter.status = ChapterStatus.UnderReview;
     await chapter.save();
+
+    try {
+      const project = await projectRepository.findById(
+        tenantId,
+        String(chapter.projectId),
+      );
+      if (project && Array.isArray(project.pages)) {
+        const page = findMatchingProjectPage(project.pages, chapter);
+        if (page) {
+          const rich = content.richTextJson as
+            | { html?: string }
+            | undefined;
+          const html = String(
+            rich?.html || chapter.content || page.content || "",
+          );
+          const wordCount =
+            typeof content.wordCount === "number"
+              ? content.wordCount
+              : countWordsFromHtml(html);
+          pushPageReviewTrail(page, {
+            type: "submitted",
+            at: version.submittedAt instanceof Date
+              ? version.submittedAt
+              : new Date(),
+            actorId: userId,
+            contentHtml: html,
+            versionNumber: version.versionNumber,
+            wordCount,
+          });
+          page.set("reviewStatus", "none");
+          page.set("reviewAnnotatedHtml", "");
+          project.markModified("pages");
+          await project.save();
+        }
+      }
+    } catch {
+      // Version is already stored; page trail must not block submit.
+    }
 
     try {
       await notificationService.notifyProjectStakeholders(
@@ -237,7 +283,12 @@ export const chapterService = {
    * Approves a chapter under review, locks it, unlocks the next chapter,
    * and recalculates project progress.
    */
-  async approve(tenantId: string, chapterId: string, actorId: string) {
+  async approve(
+    tenantId: string,
+    chapterId: string,
+    actorId: string,
+    options?: { skipPageTrail?: boolean },
+  ) {
     const chapter = await chapterRepository.findById(tenantId, chapterId);
     if (!chapter) throw new NotFoundError("Chapter not found");
 
@@ -291,6 +342,19 @@ export const chapterService = {
           page.set("reviewedAt", new Date());
           page.set("reviewedBy", actorId);
           if (!page.reviewRemark) page.set("reviewRemark", "");
+          if (!options?.skipPageTrail) {
+            pushPageReviewTrail(page, {
+              type: "approved",
+              at: new Date(),
+              actorId,
+              remark: String(page.reviewRemark || ""),
+              contentHtml: String(page.content || ""),
+              annotatedHtml: String(page.reviewAnnotatedHtml || ""),
+              wordCount: countWordsFromHtml(
+                String(page.content || page.reviewAnnotatedHtml || ""),
+              ),
+            });
+          }
           project.markModified("pages");
           await project.save();
         }
@@ -332,6 +396,7 @@ export const chapterService = {
     reason: string,
     needsRevision = true,
     annotatedHtml?: string,
+    options?: { skipPageTrail?: boolean; actorId?: string },
   ) {
     const chapter = await chapterRepository.findById(tenantId, chapterId);
     if (!chapter) throw new NotFoundError("Chapter not found");
@@ -369,6 +434,20 @@ export const chapterService = {
               : String(chapter.reviewAnnotatedHtml || "");
           if (annotated) page.set("reviewAnnotatedHtml", annotated);
           page.set("reviewedAt", new Date());
+          if (options?.actorId) page.set("reviewedBy", options.actorId);
+          if (!options?.skipPageTrail) {
+            pushPageReviewTrail(page, {
+              type: "rewrite_requested",
+              at: new Date(),
+              actorId: options?.actorId,
+              remark: reason,
+              contentHtml: String(page.content || ""),
+              annotatedHtml: annotated,
+              wordCount: countWordsFromHtml(
+                String(page.content || annotated || ""),
+              ),
+            });
+          }
           project.markModified("pages");
           await project.save();
         }
@@ -551,6 +630,14 @@ export const chapterService = {
       String(chapter.content || "") ||
       "";
 
+    const matchedPage = Array.isArray(project.pages)
+      ? findMatchingProjectPage(project.pages, chapter)
+      : undefined;
+    if (matchedPage && backfillPageReviewTrail(matchedPage)) {
+      project.markModified("pages");
+      await project.save();
+    }
+
     return {
       chapter: {
         _id: String(chapter._id),
@@ -610,6 +697,7 @@ export const chapterService = {
             email: studentDoc.email,
           }
         : null,
+      reviewTrail: matchedPage ? serializeReviewTrail(matchedPage) : [],
     };
   },
 

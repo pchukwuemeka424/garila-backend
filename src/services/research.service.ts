@@ -175,26 +175,40 @@ export async function injectSavedFiguresIntoSavedPaper(
 	savedResearchId: string,
 	userId: string,
 	figureDocumentIds: string[],
+	visualizationMarkdown?: string,
 ): Promise<void> {
 	const ids = figureDocumentIds
 		.filter((id, index, all) => Types.ObjectId.isValid(id) && all.indexOf(id) === index)
 		.slice(0, MAX_PAPER_FIGURES);
-	if (!ids.length || !Types.ObjectId.isValid(savedResearchId)) return;
+	const viz = (visualizationMarkdown ?? "").trim();
+	if ((!ids.length && !viz) || !Types.ObjectId.isValid(savedResearchId)) return;
 
 	const paper = await SavedResearchModel.findOne({
 		_id: new Types.ObjectId(savedResearchId),
 		userId: new Types.ObjectId(userId),
 	});
 	if (!paper) return;
-	if (/```research-figure\b/i.test(paper.content)) return;
 
-	const docs = await ResearchDocumentModel.find({
-		userId: new Types.ObjectId(userId),
-		_id: { $in: ids.map((id) => new Types.ObjectId(id)) },
-	});
+	// Drop previously injected notebook visuals so we can re-place them in Results/Findings.
+	const baseContent = paper.content
+		.replace(/```research-figure\b[\s\S]*?```\s*/gi, "")
+		.replace(/```research-chart\b[\s\S]*?```\s*/gi, "")
+		.replace(
+			/(?:^|\n)###\s*Notebook evidence visuals\s*\n[\s\S]*?(?=\n(?:#{1,3}\s+|\*\*)[A-Za-z]|\s*$)/gi,
+			"\n",
+		)
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+
+	const docs = ids.length
+		? await ResearchDocumentModel.find({
+				userId: new Types.ObjectId(userId),
+				_id: { $in: ids.map((id) => new Types.ObjectId(id)) },
+			})
+		: [];
 	const byId = new Map(docs.map((doc) => [doc._id.toString(), doc]));
 
-	const blocks: string[] = [];
+	const figureBlocks: string[] = [];
 	let index = 0;
 	for (const id of ids) {
 		const doc = byId.get(id);
@@ -210,7 +224,7 @@ export async function injectSavedFiguresIntoSavedPaper(
 				: `data:${mime};base64,${payload}`;
 			if (!dataUrl.startsWith("data:image/")) continue;
 			index += 1;
-			blocks.push(
+			figureBlocks.push(
 				buildResearchFigureBlock({
 					index,
 					title: (doc.title ?? "").trim() || doc.fileName,
@@ -223,9 +237,21 @@ export async function injectSavedFiguresIntoSavedPaper(
 			/* Skip figures that cannot be loaded inline. */
 		}
 	}
-	if (!blocks.length) return;
 
-	const next = injectSavedFiguresIntoPaper(paper.content, blocks.join("\n\n"));
+	const packageBlocks = [viz, ...figureBlocks].filter(Boolean).join("\n\n").trim();
+	if (!packageBlocks) {
+		if (baseContent !== paper.content.trim()) {
+			paper.content = baseContent;
+			paper.title = extractPaperTitle(baseContent, paper.topic);
+			await paper.save();
+		}
+		return;
+	}
+
+	const next = injectSavedFiguresIntoPaper(
+		baseContent,
+		`### Notebook evidence visuals\n\n${packageBlocks}`,
+	);
 	paper.content = next;
 	paper.title = extractPaperTitle(next, paper.topic);
 	if (!paper.humanEdited) {
@@ -301,7 +327,7 @@ export async function getSavedResearchById(
 
 export async function updateSavedResearchById(
 	id: string,
-	input: { topic?: string; content?: string },
+	input: { topic?: string; content?: string; sources?: SavedResearchSourcesInput | null },
 	userId?: string | null,
 ): Promise<SavedResearchDto | null> {
 	if (!Types.ObjectId.isValid(id)) return null;
@@ -311,19 +337,24 @@ export async function updateSavedResearchById(
 
 	const topic = input.topic?.trim() ?? doc.topic;
 	const content = input.content?.trim() ?? doc.content;
-	if (!topic || !content) {
-		throw new Error("Topic and content are required.");
+	if (!topic && !content && !input.sources) {
+		throw new Error("Topic, content or sources are required.");
 	}
 
 	const previousContent = doc.content;
-	doc.topic = topic;
-	doc.content = content;
-	doc.title = extractPaperTitle(content, topic);
-	// Lock AI baseline once (legacy papers use pre-edit content).
-	if (!doc.aiBaselineContent) {
-		doc.aiBaselineContent = previousContent || content;
+	if (topic) doc.topic = topic;
+	if (content) {
+		doc.content = content;
+		doc.title = extractPaperTitle(content, doc.topic);
+		// Lock AI baseline once (legacy papers use pre-edit content).
+		if (!doc.aiBaselineContent) {
+			doc.aiBaselineContent = previousContent || content;
+		}
+		doc.humanEdited = content.trim() !== String(doc.aiBaselineContent).trim();
 	}
-	doc.humanEdited = content.trim() !== String(doc.aiBaselineContent).trim();
+	if (input.sources !== undefined) {
+		doc.sources = normalizeSources(input.sources);
+	}
 	await doc.save();
 
 	return toSavedResearchDto(doc);

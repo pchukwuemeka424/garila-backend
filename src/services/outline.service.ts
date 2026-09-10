@@ -130,45 +130,85 @@ function buildAssignmentOutlinePrompt(input: GenerateOutlineInput, paperContext:
 	const { idea, disciplineLabel, topic } = input;
 	const instructions = input.assignmentInstructions?.trim() || idea.rationale.trim();
 	const uploaded = input.sourceContext?.trim();
+	const hasBrief = Boolean(instructions) || Boolean(uploaded);
 
-	return `You are outlining a coursework assignment in ${disciplineLabel} — not a thesis, journal article, or empirical study.
+	const briefBlock = instructions
+		? `**User-provided assignment information (PRIMARY — base the outline on this):**
+${instructions}
 
-**Deliverable type:** Assignment
-**Final document structure guidance:** ${getScopeProfile("assignment").outlineGuidance}
+BRIEF-FIRST (hard): Ground every outline section in this information. Explain and plan coverage for every numbered question, task, learning outcome, required section/part, theory, case, marking criterion, word limit, and referencing style named in the brief. Do not invent a different assignment question or drop brief requirements.
+`
+		: uploaded
+			? `**Uploaded assignment brief (PRIMARY — base the outline on this extracted text):**
+${uploaded}
 
-**Assignment topic (use this as the assignment focus):** ${topic.trim() || idea.title}
-**Selected title:** ${idea.title}
+BRIEF-FIRST (hard): Ground every outline section in the uploaded brief. Explain and plan coverage for every numbered question, task, learning outcome, required section/part, theory, case, marking criterion, word limit, and referencing style named there. Do not invent a different assignment question or drop brief requirements. Treat the upload as brief text, not empirical data.
+`
+			: `**Selected title:** ${idea.title}
 
-${instructions ? `**Additional notes:**\n${instructions}\n` : ""}
-${uploaded ? `\n**Uploaded assignment brief (extracted text — treat as brief text, not empirical data):**\n${uploaded}\n` : ""}
+No extended brief was supplied — outline a PhD-level argumentative assignment on the working title/topic only.
+`;
 
-Map the outline to the topic. Develop an argumentative assignment that answers the topic using retrieved literature. If uploaded brief text lists questions, map each question to a section. Honour any word limit, theories, structure, or referencing specified in uploaded text.
-
-Use the following retrieved papers as literature for the assignment. Do not invent papers outside this list. Cite them as Author (year) only.
-
-${paperContext}
-
-Return a structured Markdown outline with these sections IN THIS EXACT ORDER.
+	const structureBlock = hasBrief
+		? `Return a structured Markdown outline that MIRRORS the brief.
 Use bold section titles on their own lines. Use bullet/numbered lists — never markdown tables or pipe characters.
 
 **Assignment Outline**
 
 **1. Title**
-The assignment title, aligned to the topic.
+The assignment title, aligned to the working title and the user-provided brief.
+
+**2. Brief coverage map**
+List every question, task, LO, required part/section, theory, case, and criterion from the brief, and state how the final document will address each (one bullet per brief item). Do not collapse multiple brief tasks into a single generic “critical analysis” item.
+
+**3. Document structure**
+If the brief names sections or parts, list those exact headings in order (plus References unless forbidden). If the brief only lists questions/tasks, propose clearly labelled subsections that answer each item in order. Do not force Title → Introduction → Literature Review → Critical Analysis → Conclusion when the brief specifies otherwise.
+
+**4. Literature themes**
+Thematic strands of prior work that support answering every brief requirement (cite Author (year) from the paper list). Plan enough distinct bank cites for a final References list of at least 20 papers when the bank has ≥20. No paper-by-paper list.
+
+**5. Argument development**
+How the assignment will develop critical, PhD-level analysis against the brief (theory-aware evaluation, not undergraduate summary).
+
+**6. Conclusion takeaways**
+What the assignment will conclude, tied back to each major brief requirement.`
+		: `Return a structured Markdown outline with these sections IN THIS EXACT ORDER (fallback — no brief structure).
+Use bold section titles on their own lines. Use bullet/numbered lists — never markdown tables or pipe characters.
+
+**Assignment Outline**
+
+**1. Title**
+The assignment title, aligned to the working title.
 
 **2. Introduction**
 How the assignment will address the topic (aims, key terms, roadmap). Short academic paragraphs.
 
 **3. Literature themes**
-Thematic strands of prior work that support answering the topic (cite Author (year) from the paper list). No paper-by-paper list.
+Thematic strands of prior work (cite Author (year) from the paper list). Plan enough distinct bank cites for a final References list of at least 20 papers when the bank has ≥20. No paper-by-paper list.
 
 **4. Argument / critical analysis**
-The points the assignment will develop to answer the topic. If uploaded brief text numbered questions, list a response plan for each.
+The points the assignment will develop. PhD-level critical evaluation.
 
 **5. Conclusion takeaways**
-What the assignment will conclude, tied back to the topic.
+What the assignment will conclude, tied back to the topic.`;
 
-Do NOT include Methodology, Methods, Results, Findings, Hypotheses, Abstract, Keywords, or a project timeline.
+	return `You are outlining a PhD-level academic assignment in ${disciplineLabel} — not a thesis, journal article, or empirical study. Write for doctoral academic register even though the deliverable is an assignment.
+
+**Deliverable type:** Assignment
+**Final document structure guidance:** ${getScopeProfile("assignment").outlineGuidance}
+
+**Working title / topic:** ${topic.trim() || idea.title}
+
+${briefBlock}${uploaded && instructions ? `\n**Uploaded assignment brief (extracted text — treat as brief text, not empirical data):**\n${uploaded}\n` : ""}
+Develop an argumentative assignment that fully explains and satisfies the provided brief (or topic) using retrieved literature.
+
+Use the following retrieved papers as literature for the assignment. Do not invent papers outside this list. Cite them as Author (year) only.
+
+${paperContext}
+
+${structureBlock}
+
+Do NOT invent Methodology, Methods, Results, Findings, Hypotheses, Abstract, or Keywords unless the brief explicitly requires a literature-grounded methods discussion (still no fake data).
 Do NOT include a "Sources for further reading" section — it will be added separately.
 Do NOT mention preprint servers, repository names, or ID numbers.
 Do not use markdown tables.
@@ -381,9 +421,11 @@ function buildOutlinePrompt(input: GenerateOutlineInput, paperContext: string): 
 		.join("\n");
 	const sectionRules = profile.sectionJobs.map((job) => `- ${job}`).join("\n");
 	const sourceBlock = input.sourceContext
-		? userBrief
-			? `\n**Uploaded instructions (CFP, handbook, guidelines, or ToR — not empirical data):**\n${input.sourceContext}\n`
-			: `\n**User-selected source material:**\n${input.sourceContext}\n\nUse this private material as the primary grounding for the study title focus, problem statement, methodology, findings/expected findings, and contribution claims. Align the outline with the suggested interest topic/title and notebook content when present. Use notebook pages, lab entries, documents, datasets, surveys, and response files where relevant. Treat figures/images as metadata-only context (titles, filenames, captions, linked notes) rather than raw image understanding. Do not contradict the selected notebook material. Clearly distinguish user-provided data/findings from published literature.\n`
+		? /RESEARCH NOTEBOOK LIBRARY|NOTEBOOK PAGE:/i.test(input.sourceContext)
+			? `\n**Selected research notebook library (primary study evidence):**\n${input.sourceContext}\n\nUse this notebook as the primary grounding for the study title focus, problem statement, methodology, findings/expected findings, and contribution claims. Use notebook pages, lab entries, documents, datasets, surveys, and response files where relevant. Treat figures/images as metadata-only context (titles, filenames, captions, linked notes) rather than raw image understanding. Do not contradict the selected notebook material. Clearly distinguish notebook evidence from published literature.\n`
+			: userBrief && profile.scope === "assignment"
+				? `\n**Uploaded instructions (CFP, handbook, guidelines, or ToR — not empirical data):**\n${input.sourceContext}\n`
+				: `\n**User-selected source material:**\n${input.sourceContext}\n\nUse this private material as the primary grounding for the study title focus, problem statement, methodology, findings/expected findings, and contribution claims. Align the outline with the suggested interest topic/title and notebook content when present. Use notebook pages, lab entries, documents, datasets, surveys, and response files where relevant. Treat figures/images as metadata-only context (titles, filenames, captions, linked notes) rather than raw image understanding. Do not contradict the selected notebook material. Clearly distinguish user-provided data/findings from published literature.\n`
 		: "";
 
 	return `You are a senior academic research methodologist and thesis supervisor. Write a rigorous, publication-ready research OUTLINE for a ${scopeLabel} in ${disciplineLabel}.
@@ -560,7 +602,7 @@ export async function generateResearchOutline(
 	const briefSnippet = (input.assignmentInstructions ?? "")
 		.replace(/\s+/g, " ")
 		.trim()
-		.slice(0, 180);
+		.slice(0, input.scope === "assignment" ? 400 : 180);
 	const searchQuery = [
 		input.topic.trim(),
 		input.idea.title.replace(/\?$/, ""),
@@ -596,7 +638,7 @@ export async function generateResearchOutline(
 	const isDissertation = input.scope === "dissertation";
 	const typedSystem = scopeOutlineSystemPrompt(input.scope, fast);
 	const assignmentSystem =
-		"You write coursework assignment outlines in Markdown. Use bold-only section titles. Structure: **1. Title**, **2. Introduction**, **3. Literature themes**, **4. Argument / critical analysis**, **5. Conclusion takeaways**. Fulfil the typed topic. Never include Methodology, Methods, Results, Findings, Hypotheses, Abstract, or a project timeline. Cite Author (year) only. Keep under 2200 words before sources.";
+		"You write coursework assignment outlines in Markdown. Use bold-only section titles. Structure: **1. Title**, **2. Introduction**, **3. Literature themes**, **4. Argument / critical analysis**, **5. Conclusion takeaways**. Base the outline on the user-provided assignment information (questions, tasks, criteria, structure). Never invent a different topic. Never include Methodology, Methods, Results, Findings, Hypotheses, Abstract, or a project timeline. Cite Author (year) only. Keep under 2200 words before sources.";
 	const dissertationSystem = fast
 		? "You write concise doctoral dissertation outlines in Markdown. Use bold-only section titles. Structure: **1. Title Page**, **2. Introduction**, **3. Research questions**, **4. Literature review**, **5. Theoretical Framework**, **6. Methodology**, **7. Expected contributions**, **8. Scope and limitations**, **9. Suggested timeline**, **10. Final document section map** using the dissertation headings from the user message. Derive 3–5 doctoral research questions from the title unless the user supplied a set. Propose theoretical, empirical, and/or methodological contributions. Cite Author (year) only. Keep under 1200 words before sources."
 		: "You write rigorous doctoral dissertation outlines in Markdown. Use bold-only section titles on their own lines — never hash (#) headings. Structure: **1. Title Page**, **2. Introduction** (Background, Problem statement, Significance as paragraphs), **3. Research questions** (derive 3–5 from the title unless the user supplied a set — refine wording only; do not pad to 5–7), **4. Literature review** (Themes and Gap only — theory belongs in the next section), **5. Theoretical Framework** (name, justify, and show how it organises the questions), **6. Methodology**, **7. Expected contributions** (theoretical, empirical, and/or methodological), **8. Scope and limitations**, **9. Suggested timeline**, **10. Final document section map** using the dissertation headings from the user message. Never collapse to journal IMRaD. Use provided papers for literature review only; cite Author (year). Never mention preprint servers, repository names, or paper IDs. Keep the body under 2200 words before sources.";

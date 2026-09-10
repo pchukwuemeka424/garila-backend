@@ -15,15 +15,16 @@ import {
 import { sanitizeNotebookData } from "../lib/research-notebook.js";
 
 const MAX_IDS_PER_KIND = 5;
-const MAX_FOLDER_DOCS = 40;
-const MAX_FOLDER_DATASETS = 20;
-const MAX_FOLDER_SURVEYS = 20;
-const MAX_FOLDER_REFS = 80;
-const MAX_ITEM_CHARS = 18_000;
-const MAX_DATASET_CHARS = 28_000;
-const MAX_PROJECT_CHARS = 90_000;
-const MAX_SOURCE_CHARS = 120_000;
-const MAX_SPREADSHEET_ROWS = 400;
+const MAX_FOLDER_DOCS = 12;
+const MAX_FOLDER_DATASETS = 6;
+const MAX_FOLDER_SURVEYS = 8;
+const MAX_FOLDER_REFS = 40;
+/** Keep notebook context small enough to coexist with literature bank + paper outline. */
+const MAX_ITEM_CHARS = 6_000;
+const MAX_DATASET_CHARS = 8_000;
+const MAX_PROJECT_CHARS = 28_000;
+const MAX_SOURCE_CHARS = 36_000;
+const MAX_SPREADSHEET_ROWS = 120;
 
 export type ResearchSourceSelection = {
 	documentIds?: string[];
@@ -159,6 +160,32 @@ function packChunks(chunks: string[], max: number): string {
 		used += extra;
 	}
 	return kept.join("\n\n");
+}
+
+/** Prefer notebook notes/lab before bulky documents so truncation keeps study evidence. */
+function packProjectChunks(chunks: string[], max: number): string {
+	const priority: string[] = [];
+	const rest: string[] = [];
+	for (const chunk of chunks) {
+		const text = chunk.trim();
+		if (!text) continue;
+		if (
+			/^(RESEARCH NOTEBOOK LIBRARY:|Use the entire folder|Folder contents:|Figure handling:|Type:|Research focus|Suggested interest|NOTEBOOK PAGE:|LAB ENTRY:|NOTEBOOK SECTION:)/i.test(
+				text,
+			)
+		) {
+			priority.push(text);
+		} else {
+			rest.push(text);
+		}
+	}
+	const priorityBudget = Math.min(max, Math.floor(max * 0.7));
+	const priorityPacked = packChunks(priority, priorityBudget);
+	const used = priorityPacked.length;
+	const remaining = Math.max(4_000, max - used - 2);
+	if (!rest.length) return priorityPacked;
+	const restPacked = packChunks(rest, remaining);
+	return [priorityPacked, restPacked].filter(Boolean).join("\n\n");
 }
 
 async function extractPdf(buffer: Buffer): Promise<string> {
@@ -345,7 +372,7 @@ async function buildProjectContext(
 		if (line.trim()) chunks.push(`NOTEBOOK REFERENCE: ${line.trim()}`);
 	}
 
-	return packChunks(chunks, MAX_PROJECT_CHARS);
+	return packProjectChunks(chunks, MAX_PROJECT_CHARS);
 }
 
 export async function buildResearchSourceContext(

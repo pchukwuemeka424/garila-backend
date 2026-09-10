@@ -2,6 +2,11 @@ import { Types } from "mongoose";
 
 import { UniversityModel } from "../db/models/University.js";
 import { UserModel } from "../db/models/User.js";
+import {
+	mergeUniversityFeatures,
+	normalizeUniversityFeatures,
+	type UniversityFeatures,
+} from "../lib/university-features.js";
 
 export type UniversityRecord = {
 	id: string;
@@ -14,6 +19,7 @@ export type UniversityRecord = {
 	adminCount: number;
 	defaultStudentTokens: number | null;
 	defaultLecturerTokens: number | null;
+	features: UniversityFeatures;
 	onboardedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
@@ -38,6 +44,7 @@ function toRecord(
 		status: string;
 		defaultStudentTokens?: number | null;
 		defaultLecturerTokens?: number | null;
+		features?: Partial<UniversityFeatures> | null;
 		onboardedAt?: Date | null;
 		createdAt: Date;
 		updatedAt: Date;
@@ -55,6 +62,7 @@ function toRecord(
 		adminCount: counts.adminCount,
 		defaultStudentTokens: doc.defaultStudentTokens ?? null,
 		defaultLecturerTokens: doc.defaultLecturerTokens ?? null,
+		features: normalizeUniversityFeatures(doc.features),
 		onboardedAt: doc.onboardedAt?.toISOString() ?? null,
 		createdAt: doc.createdAt.toISOString(),
 		updatedAt: doc.updatedAt.toISOString(),
@@ -277,6 +285,7 @@ export async function updateUniversity(
 		status: "active" | "inactive";
 		defaultStudentTokens: number | null;
 		defaultLecturerTokens: number | null;
+		features: Partial<UniversityFeatures>;
 	}>,
 	actorId?: string,
 ): Promise<UniversityRecord | null> {
@@ -308,6 +317,12 @@ export async function updateUniversity(
 	}
 	if (input.defaultLecturerTokens !== undefined) {
 		uni.defaultLecturerTokens = normalizeTokenDefault(input.defaultLecturerTokens);
+	}
+	if (input.features !== undefined) {
+		uni.features = mergeUniversityFeatures(
+			uni.features as Partial<UniversityFeatures> | undefined,
+			input.features,
+		);
 	}
 	await uni.save();
 	const counts = await countsForUniversities([uni._id]);
@@ -488,3 +503,39 @@ export async function offboardUniversity(
 		suspendedUsers: suspendResult.modifiedCount,
 	};
 }
+
+export async function getFeaturesForUniversityId(
+	universityId: string | Types.ObjectId | null | undefined,
+): Promise<UniversityFeatures> {
+	if (!universityId) return normalizeUniversityFeatures(null);
+	const uni = await UniversityModel.findById(universityId).select("features").lean();
+	return normalizeUniversityFeatures(uni?.features as Partial<UniversityFeatures> | undefined);
+}
+
+export async function getUniversityModules(
+	universityId: string,
+): Promise<{ universityId: string; name: string; features: UniversityFeatures } | null> {
+	if (!Types.ObjectId.isValid(universityId)) return null;
+	const uni = await UniversityModel.findById(universityId).select("name features").lean();
+	if (!uni) return null;
+	return {
+		universityId: uni._id.toString(),
+		name: uni.name,
+		features: normalizeUniversityFeatures(uni.features as Partial<UniversityFeatures> | undefined),
+	};
+}
+
+export async function updateUniversityModules(
+	universityId: string,
+	features: Partial<UniversityFeatures>,
+	actorId?: string,
+): Promise<{ universityId: string; name: string; features: UniversityFeatures } | null> {
+	const updated = await updateUniversity(universityId, { features }, actorId);
+	if (!updated) return null;
+	return {
+		universityId: updated.id,
+		name: updated.name,
+		features: updated.features,
+	};
+}
+

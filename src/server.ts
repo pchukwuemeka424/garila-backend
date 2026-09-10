@@ -15,7 +15,14 @@ import { listOutputs } from "./server/outputs.js";
 import { ChatService } from "./services/chat.service.js";
 import { assertS3Ready, s3Enabled } from "./services/s3.service.js";
 import { getS3Bucket, getS3Endpoint } from "./config/env.js";
-import { getUserById, loginUser, registerLecturer, registerStudent } from "./services/auth.service.js";
+import {
+	getUserById,
+	loginUser,
+	registerLecturer,
+	registerStudent,
+	requestPasswordReset,
+	resetPasswordWithToken,
+} from "./services/auth.service.js";
 import {
 	createUser,
 	deleteUser,
@@ -142,6 +149,7 @@ import {
 	updateUser as adminUpdateUser,
 } from "./services/admin-users.service.js";
 import {
+	getUniversityModules,
 	getUniversityRecord,
 	listActiveUniversitiesForRegistration,
 	listUniversities as adminListUniversities,
@@ -150,13 +158,24 @@ import {
 	onboardUniversity,
 	bulkUpdateUniversityTokenDefaults,
 	updateUniversity,
+	updateUniversityModules,
 } from "./services/admin-universities.service.js";
+import {
+	getAdminPortalSummary,
+	listAdminPortalBriefs,
+	listAdminPortalProjects,
+	listAdminSupervisors,
+	updateAdminPortalBrief,
+	updateAdminPortalProject,
+} from "./services/admin-portal.service.js";
 import {
 	AdminRequiredError,
 	requireAdmin,
 	requireAdminScope,
+	requireFeatureAccess,
 	requireSuperAdmin,
 } from "./lib/require-admin.js";
+import type { UniversityFeatures } from "./lib/university-features.js";
 import {
 	createDatabaseBackup,
 	listBackupFiles,
@@ -252,12 +271,36 @@ import { cleanupSeededGovernanceMocks } from "./services/admin-governance-cleanu
 import { ensureDefaultAdmin } from "./services/bootstrap-admin.service.js";
 import { UserModel } from "./db/models/User.js";
 import { registerPortalRoutes } from "./routes/portal.js";
+import { assertUniversityFeature } from "./lib/assert-university-feature.js";
+import {
+	UniversityFeatureDisabledError,
+	type UniversityFeatureKey,
+} from "./lib/university-features.js";
 
 async function resolveUserId(authorization?: string): Promise<string | null> {
 	const token = extractBearerToken(authorization);
 	if (!token) return null;
 	const payload = verifyAuthToken(token);
 	return payload?.sub ?? null;
+}
+
+async function assertUserFeature(
+	userId: string,
+	feature: UniversityFeatureKey,
+): Promise<void> {
+	const user = await UserModel.findById(userId).select("role universityId").lean();
+	if (!user || user.role === "admin") return;
+	await assertUniversityFeature(user.universityId, feature);
+}
+
+function featureErrorReply(
+	reply: { code: (status: number) => { send: (payload: unknown) => unknown } },
+	error: unknown,
+) {
+	if (error instanceof UniversityFeatureDisabledError) {
+		return reply.code(403).send({ error: error.message });
+	}
+	return null;
 }
 
 function datasetErrorMessage(error: unknown): string {
@@ -505,6 +548,32 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
+	app.post("/api/auth/forgot-password", async (request, reply) => {
+		const body = request.body as { email?: string };
+		if (!body.email?.trim()) {
+			return reply.code(400).send({ error: "Email is required." });
+		}
+		try {
+			return await requestPasswordReset({ email: body.email });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.post("/api/auth/reset-password", async (request, reply) => {
+		const body = request.body as { token?: string; password?: string };
+		if (!body.token?.trim() || !body.password) {
+			return reply.code(400).send({ error: "Reset token and new password are required." });
+		}
+		try {
+			return await resetPasswordWithToken({ token: body.token, password: body.password });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
 	app.get("/api/auth/me", async (request, reply) => {
 		const token = extractBearerToken(request.headers.authorization);
 		if (!token) return reply.code(401).send({ error: "Authentication required." });
@@ -588,6 +657,10 @@ export async function startServer(port: number): Promise<void> {
 		try {
 			const userId = await resolveUserId(request.headers.authorization);
 			if (userId) {
+				await assertUserFeature(userId, "researchAssistant");
+				if (scope === "thesis" || scope === "dissertation") {
+					await assertUserFeature(userId, "advancedResearch");
+				}
 				await assertStudentHasTokenBalance(userId);
 			}
 			const sourceContext = await buildResearchSourceContext(userId, body.sources);
@@ -644,6 +717,8 @@ export async function startServer(port: number): Promise<void> {
 				...(tokenQuota ? { tokenQuota } : {}),
 			};
 		} catch (error) {
+			const featureReply = featureErrorReply(reply, error);
+			if (featureReply) return featureReply;
 			if (error instanceof Error && error.name === "AbortError") {
 				if (!reply.sent) return reply.code(499).send({ error: "Request cancelled." });
 				return;
@@ -680,6 +755,10 @@ export async function startServer(port: number): Promise<void> {
 		try {
 			const userId = await resolveUserId(request.headers.authorization);
 			if (userId) {
+				await assertUserFeature(userId, "researchAssistant");
+				if (scope === "thesis" || scope === "dissertation") {
+					await assertUserFeature(userId, "advancedResearch");
+				}
 				await assertStudentHasTokenBalance(userId);
 			}
 			const sourceContext = await buildResearchSourceContext(userId, body.sources);
@@ -705,6 +784,8 @@ export async function startServer(port: number): Promise<void> {
 				...(tokenQuota ? { tokenQuota } : {}),
 			};
 		} catch (error) {
+			const featureReply = featureErrorReply(reply, error);
+			if (featureReply) return featureReply;
 			if (error instanceof Error && error.name === "AbortError") {
 				if (!reply.sent) return reply.code(499).send({ error: "Request cancelled." });
 				return;
@@ -754,6 +835,7 @@ export async function startServer(port: number): Promise<void> {
 			prompt?: string;
 			topic?: string;
 			figureDocumentIds?: string[];
+			visualizationMarkdown?: string;
 			sources?: {
 				documentIds?: string[];
 				datasetIds?: string[];
@@ -766,16 +848,20 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(400).send({ error: "Prompt is required." });
 		}
 		try {
+			await assertUserFeature(userId, "researchAssistant");
 			const job = await startResearchPaperJob({
 				ctx,
 				userId,
 				prompt: body.prompt,
 				topic: body.topic,
 				figureDocumentIds: body.figureDocumentIds,
+				visualizationMarkdown: body.visualizationMarkdown,
 				sources: body.sources,
 			});
 			return { job };
 		} catch (error) {
+			const featureReply = featureErrorReply(reply, error);
+			if (featureReply) return featureReply;
 			const message = error instanceof Error ? error.message : String(error);
 			const conflict = message.includes("already generating");
 			return reply.code(conflict ? 409 : 400).send({ error: message });
@@ -828,9 +914,13 @@ export async function startServer(port: number): Promise<void> {
 	});
 
 	app.patch<{ Params: { id: string } }>("/api/research/saved/:id", async (request, reply) => {
-		const body = request.body as { topic?: string; content?: string };
-		if (!body.topic?.trim() && !body.content?.trim()) {
-			return reply.code(400).send({ error: "Topic or content is required." });
+		const body = request.body as {
+			topic?: string;
+			content?: string;
+			sources?: import("./services/research.service.js").SavedResearchSourcesInput | null;
+		};
+		if (!body.topic?.trim() && !body.content?.trim() && !body.sources) {
+			return reply.code(400).send({ error: "Topic, content or sources are required." });
 		}
 		try {
 			const userId = await resolveUserId(request.headers.authorization);
@@ -1332,9 +1422,12 @@ export async function startServer(port: number): Promise<void> {
 			sizeLabel?: string;
 		};
 		try {
+			await assertUserFeature(userId, "researchNotebook");
 			const document = await createDocument(userId, body);
 			return { document };
 		} catch (error) {
+			const featureReply = featureErrorReply(reply, error);
+			if (featureReply) return featureReply;
 			const message = error instanceof Error ? error.message : String(error);
 			return reply.code(400).send({ error: message });
 		}
@@ -2031,6 +2124,7 @@ export async function startServer(port: number): Promise<void> {
 				status: "active" | "inactive";
 				defaultStudentTokens: number | null;
 				defaultLecturerTokens: number | null;
+				features: Partial<UniversityFeatures>;
 			}>;
 			const university = await updateUniversity(request.params.id, body, adminId);
 			if (!university) return reply.code(404).send({ error: "University not found." });
@@ -2045,6 +2139,7 @@ export async function startServer(port: number): Promise<void> {
 				details: {
 					defaultStudentTokens: university.defaultStudentTokens,
 					defaultLecturerTokens: university.defaultLecturerTokens,
+					features: university.features,
 				},
 			});
 			return { university };
@@ -2098,6 +2193,203 @@ export async function startServer(port: number): Promise<void> {
 		"/api/admin/universities/:id/offboard",
 		offboardUniversityHandler,
 	);
+
+	app.get("/api/admin/modules", async (request, reply) => {
+		try {
+			const scope = await requireFeatureAccess(request.headers.authorization, "modules", "view");
+			const query = request.query as { universityId?: string };
+			const universityId =
+				scope.kind === "university"
+					? scope.universityId
+					: query.universityId?.trim() || "";
+			if (!universityId) {
+				return reply.code(400).send({ error: "universityId is required for platform scope." });
+			}
+			const modules = await getUniversityModules(universityId);
+			if (!modules) return reply.code(404).send({ error: "University not found." });
+			return { modules };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.patch("/api/admin/modules", async (request, reply) => {
+		try {
+			const scope = await requireFeatureAccess(request.headers.authorization, "modules", "edit");
+			const body = request.body as {
+				universityId?: string;
+				features?: Partial<UniversityFeatures>;
+			};
+			const universityId =
+				scope.kind === "university"
+					? scope.universityId
+					: body.universityId?.trim() || "";
+			if (!universityId) {
+				return reply.code(400).send({ error: "universityId is required for platform scope." });
+			}
+			if (!body.features || typeof body.features !== "object") {
+				return reply.code(400).send({ error: "features object is required." });
+			}
+			const modules = await updateUniversityModules(universityId, body.features, scope.actorId);
+			if (!modules) return reply.code(404).send({ error: "University not found." });
+			await recordAuditEvent({
+				action: "admin.modules_updated",
+				category: "admin",
+				actorId: scope.actorId,
+				summary: `Updated product modules for ${modules.name}`,
+				targetType: "university",
+				targetId: modules.universityId,
+				severity: "medium",
+				details: { features: modules.features },
+			});
+			return { modules };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/portal/summary", async (request, reply) => {
+		try {
+			let scope;
+			try {
+				scope = await requireFeatureAccess(request.headers.authorization, "supervision", "view");
+			} catch {
+				scope = await requireFeatureAccess(request.headers.authorization, "assessment", "view");
+			}
+			const summary = await getAdminPortalSummary(scope);
+			return { summary };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/portal/projects", async (request, reply) => {
+		try {
+			const query = request.query as {
+				family?: string;
+				status?: string;
+				universityId?: string;
+				search?: string;
+				limit?: string;
+			};
+			const family =
+				query.family === "assignment"
+					? "assignment"
+					: query.family === "supervision"
+						? "supervision"
+						: "all";
+			const feature = family === "assignment" ? "assessment" : "supervision";
+			const scope = await requireFeatureAccess(request.headers.authorization, feature, "view");
+			const projects = await listAdminPortalProjects(scope, {
+				family,
+				status: query.status,
+				universityId: query.universityId,
+				search: query.search,
+				limit: query.limit ? Number(query.limit) : undefined,
+			});
+			return { projects };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.patch<{ Params: { id: string } }>("/api/admin/portal/projects/:id", async (request, reply) => {
+		try {
+			const body = request.body as Partial<{
+				supervisorId: string | null;
+				coSupervisorId: string | null;
+				status: string;
+			}>;
+			// Either supervision or assessment editors may update project metadata.
+			let scope;
+			try {
+				scope = await requireFeatureAccess(request.headers.authorization, "supervision", "edit");
+			} catch {
+				scope = await requireFeatureAccess(request.headers.authorization, "assessment", "edit");
+			}
+			const project = await updateAdminPortalProject(scope, request.params.id, body, scope.actorId);
+			if (!project) return reply.code(404).send({ error: "Project not found." });
+			return { project };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/portal/briefs", async (request, reply) => {
+		try {
+			const scope = await requireFeatureAccess(request.headers.authorization, "assessment", "view");
+			const query = request.query as {
+				universityId?: string;
+				status?: string;
+				search?: string;
+				limit?: string;
+			};
+			const briefs = await listAdminPortalBriefs(scope, {
+				universityId: query.universityId,
+				status: query.status,
+				search: query.search,
+				limit: query.limit ? Number(query.limit) : undefined,
+			});
+			return { briefs };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.patch<{ Params: { id: string } }>("/api/admin/portal/briefs/:id", async (request, reply) => {
+		try {
+			const scope = await requireFeatureAccess(request.headers.authorization, "assessment", "edit");
+			const body = request.body as Partial<{ status: "draft" | "published"; archive: boolean }>;
+			const brief = await updateAdminPortalBrief(scope, request.params.id, body, scope.actorId);
+			if (!brief && !body.archive) return reply.code(404).send({ error: "Brief not found." });
+			return { brief, archived: Boolean(body.archive) };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/portal/supervisors", async (request, reply) => {
+		try {
+			const scope = await requireFeatureAccess(request.headers.authorization, "supervision", "view");
+			const query = request.query as { universityId?: string };
+			const supervisors = await listAdminSupervisors(scope, query.universityId);
+			return { supervisors };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
 
 	app.post("/api/admin/users", async (request, reply) => {
 		try {
