@@ -26,6 +26,8 @@ Alternative: Base Directory = `backend` and Build Pack = Nixpacks (`backend/nixp
 4. Health `/api/health`
 5. Same env vars as above — create/link a MongoDB resource and paste its connection string into `MONGODB_URI`
 
+Pushes to `main` on that repo auto-redeploy this Coolify app. Use `[skip cd]` in the commit message to skip.
+
 ## Docker
 
 ```bash
