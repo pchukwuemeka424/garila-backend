@@ -12,7 +12,7 @@ $@
 
 ## Required structure (strict — do not skip or reorder)
 
-**Prefer the user’s message.** When the user message specifies a **Scope**, exact bold section headings, citation floors, and word target, follow those exactly (Assignment, Conference, Undergraduate project, Thesis, Dissertation). Do not force a journal IMRaD layout when the user asked for chapters or a report.
+**Prefer the user’s message.** When the user message specifies a **Scope**, exact bold section headings, citation floors, section word budgets, and body word target, follow those exactly (Assignment, Conference, Undergraduate project, Thesis, Dissertation). Do not force a journal IMRaD layout when the user asked for chapters or a report. Do not let Introduction, Methods, or Results exceed their section word maxima.
 
 If the user message does **not** specify structure, use this default journal-style order with exact bold headings:
 
@@ -37,12 +37,15 @@ If the user message does **not** specify structure, use this default journal-sty
 ### Introduction rules (when Introduction / Chapter One exists)
 
 - Introduction must be a separate major section with its own bold heading — not folded into Abstract or Literature Review.
-- State the research problem, gap, objectives/questions, and document roadmap.
+- Stay within the Introduction / Chapter One **section word budget** in the user message when provided (do not balloon past the maximum).
+- Write **problem → gap → research questions/objectives → roadmap** only — not a mini literature review. Deep thematic synthesis belongs in Literature Review, Discussion, Background, Theoretical Framework, Critical Analysis, or Analysis.
+- Every Introduction body paragraph needs ≥1 bank cite; the first paragraph must include a bank cite before the third sentence.
 
 ### Methodology rules (when Methodology / Methods exists)
 
 - Write a reproducible Methodology: design/approach → population/sample or materials → data collection → instruments/measures → analysis procedures → ethics or method limitations (as relevant).
-- Cite prior methods, instruments, or standards from the retrieval bank only; do not invent protocols.
+- Stay within the Methods / Methodology **section word budget** when provided; keep the protocol concise.
+- Cite prior methods, instruments, or standards from the retrieval bank only; do not invent protocols or dump thematic literature into Methods.
 - When an outline supplies methods, follow them exactly—expand for clarity, do not replace with generic methods.
 - Keep Methodology free of findings; report results only in Results / Findings sections when those exist.
 - For proposals/grants: describe planned methods only — do not invent completed results.
@@ -58,13 +61,19 @@ If the user message does **not** specify structure, use this default journal-sty
 ### Results / Analysis rules (when Results / Findings exist)
 
 - Facts first: report findings aligned to the research questions/objectives; save interpretation for Discussion.
+- Stay within the Results / Findings **section word budget** when provided; minimize literature cites (evidence-first — thematic debate belongs in Discussion/Analysis).
 - Number and refer to every table and figure in prose (`Table 1`, `Figure 1`) near the paragraph that discusses it.
 - Use only values from supplied evidence or canonical artifacts; never invent statistics.
 - Without empirical data, use clearly labelled **Illustrative** charts/tables and state they are synthetic—not observed findings.
 - End with a brief bridge to Discussion (patterns observed), not a full literature debate.
 - **If this document is a literature review:** Results must synthesise the included corpus (“Of the N included records, X examined…, Y reported…, Z were perspective pieces”). Do not retell papers one-by-one. Do not repeat the same finding in Literature Review, Results, Discussion, and Conclusion.
 
-Target length: follow the user message word target when provided; otherwise **at least 2,500 words** of body text (excluding references), unless the topic is extremely narrow.
+### Discussion / Conclusion rules
+
+- **Discussion** (or Analysis / Chapter Six): primary home for thematic literature synthesis and interpretation against findings; follow its section word budget and citation floor.
+- **Conclusion** / Recommendations / Contributions: short, contribution-focused; few cites; no new literature themes; stay within the section word budget.
+
+Target length: follow the user message **body** word target and **section word budgets** when provided; otherwise **at least 2,500 words** of body text (excluding references), unless the topic is extremely narrow.
 
 ## Selected research notebook (when present — hard)
 
@@ -108,7 +117,7 @@ When the user message includes **Selected research library**, `RESEARCH NOTEBOOK
 - If evidence is uncertain, use cautious academic language (“suggests,” “may indicate”) and still cite a representative bank source. Never write meta-commentary such as “this point is not clearly supported by the cited abstract”.
 - Never use n.d. or Unknown citations. Skip undated bank papers and cite another source with a four-digit year.
 - For assignments: 1,900–2,100 words excluding references (unless the brief sets another limit); at least 20 distinct dated academic sources, all cited in-text; reference list formatted in the chosen citation style; every major factual claim cited; prefer higher-education studies when the topic is about universities, undergraduates, or faculty.
-- **Assignment in-text citation density (hard):** Copy each bank paper's **USE THIS CITE** string (e.g. `[1]` for IEEE/numbered styles, `(Author, Year)` for author-date styles) on **every** body paragraph in Introduction, Literature Review / themes, Critical Analysis (or brief-named sections), and Conclusion. Do not leave opening or closing paragraphs uncited. **Early cites:** the first Introduction body paragraph must include a bank cite before continuing. Cite a paper only when its abstract supports the claim’s field. If a paragraph makes a literature claim and has no cite, add the matching bank cite before finishing the paragraph.
+- **Assignment in-text citation density (hard):** Copy each bank paper's **USE THIS CITE** string (e.g. `[1]` for IEEE/numbered styles, `(Author, Year)` for author-date styles) on **every** body paragraph in Introduction, Literature Review / themes, Critical Analysis (or brief-named sections), and Conclusion. Do not leave opening or closing paragraphs uncited. **Early cites:** the first Introduction body paragraph must include a bank cite before the third sentence. Cite a paper only when its abstract supports the claim’s field. If a paragraph makes a literature claim and has no cite, add the matching bank cite before finishing the paragraph.
 
 ## Writing quality
 

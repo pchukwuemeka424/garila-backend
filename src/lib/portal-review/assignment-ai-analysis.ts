@@ -748,13 +748,15 @@ export function suggestAssignmentScore(opts: {
 export type AssignmentBriefContext = {
   title: string;
   instructions: string;
-  /** Lecturer topic: project topic, or brief title as fallback. */
+  /** Brief-first topic: brief title, then project topic/title only if brief title empty. */
   topic: string;
   requiredItems: string[];
   rubric: Array<{ name: string; maxMarks: number }>;
   maxScore: number;
   wordCountMin: number | null;
   wordCountMax: number | null;
+  courseName?: string;
+  courseYear?: string;
 };
 
 export type NormalizedSubmission = {
@@ -1124,7 +1126,15 @@ export function classifyAssignmentMatch(opts: {
     opts.alignment ||
     buildLocalAlignmentScores(opts.topicAlignment, opts.instructionCompliance);
   const expectedDiscipline = inferDisciplineHint(
-    `${opts.brief.topic} ${opts.brief.title} ${opts.brief.instructions.slice(0, 800)}`,
+    [
+      opts.brief.courseName,
+      opts.brief.courseYear,
+      opts.brief.topic,
+      opts.brief.title,
+      opts.brief.instructions.slice(0, 800),
+    ]
+      .filter(Boolean)
+      .join(" "),
   );
   const detectedDiscipline = inferDisciplineHint(opts.submissionText.slice(0, 4000));
 

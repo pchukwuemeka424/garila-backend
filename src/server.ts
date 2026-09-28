@@ -16,6 +16,7 @@ import { ChatService } from "./services/chat.service.js";
 import { assertS3Ready, s3Enabled } from "./services/s3.service.js";
 import { getS3Bucket, getS3Endpoint } from "./config/env.js";
 import {
+	acceptPolicies,
 	getUserById,
 	loginUser,
 	registerLecturer,
@@ -269,6 +270,12 @@ import {
 } from "./services/admin-inventory.service.js";
 import { cleanupSeededGovernanceMocks } from "./services/admin-governance-cleanup.service.js";
 import { ensureDefaultAdmin } from "./services/bootstrap-admin.service.js";
+import {
+	ensureDefaultLegalDocuments,
+	getLegalDocument,
+	listLegalDocuments,
+	updateLegalDocument,
+} from "./services/legal-documents.service.js";
 import { UserModel } from "./db/models/User.js";
 import { registerPortalRoutes } from "./routes/portal.js";
 import { assertUniversityFeature } from "./lib/assert-university-feature.js";
@@ -375,6 +382,7 @@ export async function startServer(port: number): Promise<void> {
 	ensureSupportedNodeVersion();
 	await connectMongo();
 	await ensureDefaultAdmin();
+	await ensureDefaultLegalDocuments();
 	await cleanupSeededGovernanceMocks();
 	await ensureDefaultAiSystems();
 	await normalizeContributionDefaults();
@@ -483,6 +491,7 @@ export async function startServer(port: number): Promise<void> {
 			institution?: string;
 			catalogueId?: string;
 			country?: string;
+			acceptedPolicies?: boolean;
 		};
 		if (!body.name?.trim() || !body.email?.trim() || !body.password || !body.department?.trim()) {
 			return reply.code(400).send({ error: "Name, email, password, and department are required." });
@@ -496,6 +505,7 @@ export async function startServer(port: number): Promise<void> {
 				institution: body.institution,
 				catalogueId: body.catalogueId,
 				country: body.country,
+				acceptedPolicies: body.acceptedPolicies === true,
 			});
 			return result;
 		} catch (error) {
@@ -513,6 +523,7 @@ export async function startServer(port: number): Promise<void> {
 			institution?: string;
 			catalogueId?: string;
 			country?: string;
+			acceptedPolicies?: boolean;
 		};
 		if (!body.name?.trim() || !body.email?.trim() || !body.password || !body.department?.trim()) {
 			return reply.code(400).send({ error: "Name, email, password, and program are required." });
@@ -526,6 +537,7 @@ export async function startServer(port: number): Promise<void> {
 				institution: body.institution,
 				catalogueId: body.catalogueId,
 				country: body.country,
+				acceptedPolicies: body.acceptedPolicies === true,
 			});
 			return result;
 		} catch (error) {
@@ -557,7 +569,12 @@ export async function startServer(port: number): Promise<void> {
 			return await requestPasswordReset({ email: body.email });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(500).send({ error: message });
+			const notFound = message === "No account exists for that email.";
+			const badRequest =
+				notFound ||
+				message === "Enter a valid email address." ||
+				message.startsWith("Unable to send");
+			return reply.code(badRequest ? (notFound ? 404 : 400) : 500).send({ error: message });
 		}
 	});
 
@@ -584,6 +601,101 @@ export async function startServer(port: number): Promise<void> {
 		const user = await getUserById(payload.sub);
 		if (!user) return reply.code(401).send({ error: "User not found." });
 		return { user };
+	});
+
+	app.post("/api/auth/accept-policies", async (request, reply) => {
+		const token = extractBearerToken(request.headers.authorization);
+		if (!token) return reply.code(401).send({ error: "Authentication required." });
+
+		const payload = verifyAuthToken(token);
+		if (!payload) return reply.code(401).send({ error: "Invalid or expired session." });
+
+		const body = request.body as { acceptedPolicies?: boolean };
+		if (body.acceptedPolicies !== true) {
+			return reply.code(400).send({
+				error: "You must agree to the Terms of Service, Privacy Policy, and Acceptable Use Policy.",
+			});
+		}
+
+		try {
+			const user = await acceptPolicies(payload.sub);
+			return { user };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(400).send({ error: message });
+		}
+	});
+
+	app.get("/api/legal", async (_request, reply) => {
+		try {
+			const data = await listLegalDocuments();
+			return data;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.get("/api/legal/:id", async (request, reply) => {
+		const { id } = request.params as { id: string };
+		try {
+			const document = await getLegalDocument(id);
+			return { document };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const code = message === "Unknown legal document." ? 404 : 500;
+			return reply.code(code).send({ error: message });
+		}
+	});
+
+	app.get("/api/admin/legal", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			return await listLegalDocuments();
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
+		}
+	});
+
+	app.put("/api/admin/legal/:id", async (request, reply) => {
+		const { id } = request.params as { id: string };
+		const body = request.body as {
+			title?: string;
+			intro?: string;
+			sections?: { title?: string; paragraphs?: string[] }[];
+		};
+		try {
+			const adminId = await requireSuperAdmin(request.headers.authorization);
+			const result = await updateLegalDocument(
+				id,
+				{
+					title: body.title ?? "",
+					intro: body.intro ?? "",
+					sections: (body.sections ?? []).map((section) => ({
+						title: section.title ?? "",
+						paragraphs: section.paragraphs ?? [],
+					})),
+				},
+				adminId,
+			);
+			return result;
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			const code =
+				message === "Unknown legal document."
+					? 404
+					: message.includes("required") || message.startsWith("Add at least")
+						? 400
+						: 500;
+			return reply.code(code).send({ error: message });
+		}
 	});
 
 	app.get("/api/workflows", async () => ({

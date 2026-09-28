@@ -7,14 +7,20 @@ import type { StudentTokenQuota } from "../constants/student-tokens.js";
 import { UserModel, type UserDocument } from "../db/models/User.js";
 import { signAuthToken } from "../lib/auth-token.js";
 import { isFreeEmail, LECTURER_FREE_EMAIL_ERROR } from "../lib/email.js";
+import {
+	buildPasswordChangedEmail,
+	buildPasswordResetEmail,
+} from "../lib/email-templates.js";
 import { sendMail } from "../lib/mailer.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
+import { POLICIES_REQUIRED_ERROR } from "../lib/policy-consent.js";
 import {
 	getActiveUniversityByCatalogueId,
 	getFeaturesForUniversityId,
 	isUniversityActive,
 } from "./admin-universities.service.js";
 import { DEFAULT_UNIVERSITY_FEATURES } from "../lib/university-features.js";
+import { getAccountPolicyVersion } from "./legal-documents.service.js";
 import { quotaForUserAsync } from "./token-quota.service.js";
 
 export type PublicUser = {
@@ -32,6 +38,8 @@ export type PublicUser = {
 	createdAt: string;
 	tokenQuota?: StudentTokenQuota;
 	features?: import("../lib/university-features.js").UniversityFeatures;
+	policyVersion: string | null;
+	needsPolicyAcceptance: boolean;
 };
 
 const UNIVERSITY_NOT_ONBOARDED =
@@ -44,7 +52,10 @@ async function toPublicUser(user: UserDocument | Record<string, unknown>): Promi
 		tokensUsed?: number;
 		tokenAllowance?: number | null;
 		universityId?: Types.ObjectId | null;
+		policyVersion?: string | null;
 	};
+	const currentPolicyVersion = await getAccountPolicyVersion();
+	const policyVersion = doc.policyVersion?.trim() || null;
 	const publicUser: PublicUser = {
 		id: doc._id.toString(),
 		name: doc.name,
@@ -62,6 +73,8 @@ async function toPublicUser(user: UserDocument | Record<string, unknown>): Promi
 			doc.role === "admin"
 				? { ...DEFAULT_UNIVERSITY_FEATURES }
 				: await getFeaturesForUniversityId(doc.universityId ?? null),
+		policyVersion,
+		needsPolicyAcceptance: policyVersion !== currentPolicyVersion,
 	};
 	const tokenQuota = await quotaForUserAsync(doc);
 	if (tokenQuota) {
@@ -107,6 +120,23 @@ async function resolveRegistrationUniversity(input: {
 	};
 }
 
+function assertPoliciesAccepted(acceptedPolicies: boolean | undefined) {
+	if (acceptedPolicies !== true) {
+		throw new Error(POLICIES_REQUIRED_ERROR);
+	}
+}
+
+async function policyAcceptanceFields() {
+	const now = new Date();
+	const policyVersion = await getAccountPolicyVersion();
+	return {
+		termsAcceptedAt: now,
+		privacyAcceptedAt: now,
+		aupAcceptedAt: now,
+		policyVersion,
+	};
+}
+
 export async function registerStudent(input: {
 	name: string;
 	email: string;
@@ -115,6 +145,7 @@ export async function registerStudent(input: {
 	institution?: string;
 	catalogueId?: string;
 	country?: string;
+	acceptedPolicies?: boolean;
 }) {
 	const name = input.name.trim();
 	const email = input.email.trim().toLowerCase();
@@ -124,6 +155,7 @@ export async function registerStudent(input: {
 	if (!validateEmail(email)) throw new Error("Please enter a valid email address.");
 	if (input.password.length < 8) throw new Error("Password must be at least 8 characters.");
 	if (department.length < 2) throw new Error("Please enter your program or department.");
+	assertPoliciesAccepted(input.acceptedPolicies);
 
 	const { universityId, institution } = await resolveRegistrationUniversity(input);
 
@@ -133,6 +165,7 @@ export async function registerStudent(input: {
 	}
 
 	const passwordHash = await hashPassword(input.password);
+	const policies = await policyAcceptanceFields();
 
 	const user = existing
 		? await UserModel.findByIdAndUpdate(
@@ -146,6 +179,7 @@ export async function registerStudent(input: {
 					role: "student",
 					status: "active",
 					lastActiveAt: new Date(),
+					...policies,
 				},
 				{ new: true },
 			)
@@ -159,6 +193,7 @@ export async function registerStudent(input: {
 				role: "student",
 				status: "active",
 				lastActiveAt: new Date(),
+				...policies,
 			});
 
 	if (!user) throw new Error("Registration failed.");
@@ -182,6 +217,7 @@ export async function registerLecturer(input: {
 	institution?: string;
 	catalogueId?: string;
 	country?: string;
+	acceptedPolicies?: boolean;
 }) {
 	const name = input.name.trim();
 	const email = input.email.trim().toLowerCase();
@@ -192,6 +228,7 @@ export async function registerLecturer(input: {
 	if (isFreeEmail(email)) throw new Error(LECTURER_FREE_EMAIL_ERROR);
 	if (input.password.length < 8) throw new Error("Password must be at least 8 characters.");
 	if (department.length < 2) throw new Error("Please enter your department or faculty.");
+	assertPoliciesAccepted(input.acceptedPolicies);
 
 	const { universityId, institution } = await resolveRegistrationUniversity(input);
 
@@ -201,6 +238,7 @@ export async function registerLecturer(input: {
 	}
 
 	const passwordHash = await hashPassword(input.password);
+	const policies = await policyAcceptanceFields();
 
 	const user = existing
 		? await UserModel.findByIdAndUpdate(
@@ -214,6 +252,7 @@ export async function registerLecturer(input: {
 					role: "lecturer",
 					status: "active",
 					lastActiveAt: new Date(),
+					...policies,
 				},
 				{ new: true },
 			)
@@ -227,6 +266,7 @@ export async function registerLecturer(input: {
 				role: "lecturer",
 				status: "active",
 				lastActiveAt: new Date(),
+				...policies,
 			});
 
 	if (!user) throw new Error("Registration failed.");
@@ -275,16 +315,23 @@ export async function getUserById(id: string): Promise<PublicUser | null> {
 	return toPublicUser(user);
 }
 
+export async function acceptPolicies(userId: string): Promise<PublicUser> {
+	const policies = await policyAcceptanceFields();
+	const user = await UserModel.findByIdAndUpdate(userId, { $set: policies }, { new: true });
+	if (!user) throw new Error("User not found.");
+	return toPublicUser(user);
+}
+
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
-const GENERIC_RESET_MESSAGE =
-	"If an account exists for that email, you will receive password reset instructions shortly.";
+const RESET_SENT_MESSAGE =
+	"Password reset instructions have been sent to your email. Check your inbox and spam folder.";
 
 function hashResetToken(token: string): string {
 	return createHash("sha256").update(token).digest("hex");
 }
 
 /**
- * Starts a self-service password reset. Always returns a generic message to avoid email enumeration.
+ * Starts a self-service password reset.
  * When email is not configured (local), includes `devResetUrl` outside production.
  */
 export async function requestPasswordReset(input: {
@@ -292,14 +339,14 @@ export async function requestPasswordReset(input: {
 }): Promise<{ message: string; devResetUrl?: string }> {
 	const email = input.email.trim().toLowerCase();
 	if (!validateEmail(email)) {
-		return { message: GENERIC_RESET_MESSAGE };
+		throw new Error("Enter a valid email address.");
 	}
 
 	const user = await UserModel.findOne({ email }).select(
 		"+passwordHash +passwordResetTokenHash +passwordResetExpires",
 	);
 	if (!user?.passwordHash || user.status !== "active") {
-		return { message: GENERIC_RESET_MESSAGE };
+		throw new Error("No account exists for that email.");
 	}
 
 	const rawToken = randomBytes(32).toString("hex");
@@ -308,30 +355,15 @@ export async function requestPasswordReset(input: {
 	await user.save();
 
 	const resetUrl = `${getAppUrl()}/reset-password?token=${encodeURIComponent(rawToken)}`;
-	const text = [
-		`Hi ${user.name},`,
-		"",
-		"We received a request to reset your Garil AI password.",
-		"Open this link to choose a new password (expires in 1 hour):",
-		resetUrl,
-		"",
-		"If you did not request this, you can ignore this email.",
-	].join("\n");
-
-	const html = `
-		<p>Hi ${escapeHtml(user.name)},</p>
-		<p>We received a request to reset your Garil AI password.</p>
-		<p><a href="${resetUrl}">Choose a new password</a> (expires in 1 hour).</p>
-		<p>If you did not request this, you can ignore this email.</p>
-	`.trim();
+	const mail = buildPasswordResetEmail({ name: user.name, resetUrl });
 
 	let delivered = false;
 	try {
 		const result = await sendMail({
 			to: user.email,
-			subject: "Reset your Garil AI password",
-			text,
-			html,
+			subject: mail.subject,
+			text: mail.text,
+			html: mail.html,
 		});
 		delivered = result.delivered;
 	} catch (err) {
@@ -343,7 +375,7 @@ export async function requestPasswordReset(input: {
 	}
 
 	const response: { message: string; devResetUrl?: string } = {
-		message: GENERIC_RESET_MESSAGE,
+		message: RESET_SENT_MESSAGE,
 	};
 	if (!delivered && process.env.NODE_ENV !== "production") {
 		response.devResetUrl = resetUrl;
@@ -383,15 +415,20 @@ export async function resetPasswordWithToken(input: {
 		{ $unset: { passwordResetTokenHash: 1, passwordResetExpires: 1 } },
 	);
 
-	return { message: "Password updated. You can sign in with your new password." };
-}
+	try {
+		const mail = buildPasswordChangedEmail({ name: user.name });
+		await sendMail({
+			to: user.email,
+			subject: mail.subject,
+			text: mail.text,
+			html: mail.html,
+		});
+	} catch (err) {
+		// Password already updated — do not fail the reset if notification email fails.
+		console.error("[auth] Failed to send password-changed email:", err);
+	}
 
-function escapeHtml(value: string): string {
-	return value
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+	return { message: "Password updated. You can sign in with your new password." };
 }
 
 export { UNIVERSITY_NOT_ONBOARDED };

@@ -85,6 +85,10 @@ const userSchema = new Schema(
 		invitedAt: { type: Date },
 		suspensionReason: { type: String, trim: true },
 		complianceFlags: [{ type: String, trim: true }],
+		termsAcceptedAt: { type: Date },
+		privacyAcceptedAt: { type: Date },
+		aupAcceptedAt: { type: Date },
+		policyVersion: { type: String, trim: true },
 	},
 	{ timestamps: true },
 );

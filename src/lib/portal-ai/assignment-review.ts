@@ -33,6 +33,8 @@ Determine whether the student's work genuinely answers the lecturer's assignment
 
 If the work is outside the expected body of knowledge, STOP the grading process.
 
+The attached lecturer assignment brief is the SOLE marking authority: title, instructions, must-include items, rubric, word limits, and course/module. Do not invent a different task from the project topic or page title alone.
+
 --------------------------------------------------------
 
 ABSOLUTE RULES
@@ -137,6 +139,8 @@ export function buildGatekeeperUserPrompt(opts: {
   topic: string;
   instructions: string;
   mustIncludeHint: string;
+  courseName?: string;
+  courseYear?: string;
   localTopicScore: number;
   localTopicCoverage: number;
   localInstructionCoverage: number;
@@ -145,8 +149,11 @@ export function buildGatekeeperUserPrompt(opts: {
   text: string;
 }): string {
   return [
+    "MARKING AUTHORITY: The lecturer assignment brief below is the sole source of the task. Grade only against it.",
     `LECTURER TOPIC: ${opts.topic}`,
     `Assignment: “${opts.briefTitle}”`,
+    opts.courseName ? `COURSE: ${opts.courseName}` : null,
+    opts.courseYear ? `YEAR: ${opts.courseYear}` : null,
     "",
     "LECTURER INSTRUCTIONS:",
     opts.instructions ||
@@ -162,7 +169,9 @@ export function buildGatekeeperUserPrompt(opts: {
     "",
     "STUDENT SUBMISSION (evaluate the body, not titles alone):",
     opts.text,
-  ].join("\n");
+  ]
+    .filter((line) => line != null)
+    .join("\n");
 }
 
 export const ASSIGNMENT_MARKER_SYSTEM = `${ASSIGNMENT_REVIEW_ROLE_PREAMBLE}
@@ -231,11 +240,16 @@ export function buildMarkerUserPrompt(opts: {
   instructionCoverage: number;
   rubricHint: string;
   localSuggestedMark: number;
+  courseName?: string;
+  courseYear?: string;
   text: string;
 }): string {
   return [
+    "MARKING AUTHORITY: Score only against the lecturer assignment brief (instructions, must-includes, rubric). Do not invent criteria.",
     `Assignment: “${opts.briefTitle}”`,
     `Page: “${opts.pageTitle}”`,
+    opts.courseName ? `COURSE: ${opts.courseName}` : null,
+    opts.courseYear ? `YEAR: ${opts.courseYear}` : null,
     `Max score: ${opts.maxScore}`,
     opts.wordCountLine,
     "",
@@ -256,7 +270,9 @@ export function buildMarkerUserPrompt(opts: {
     "",
     "STUDENT SUBMISSION:",
     opts.text,
-  ].join("\n");
+  ]
+    .filter((line) => line != null)
+    .join("\n");
 }
 
 export const ASSIGNMENT_MODERATOR_SYSTEM = `${ASSIGNMENT_REVIEW_ROLE_PREAMBLE}
@@ -314,10 +330,15 @@ export function buildModeratorUserPrompt(opts: {
   alignmentSummary: string;
   expectedDiscipline: string;
   detectedDiscipline: string;
+  courseName?: string;
+  courseYear?: string;
 }): string {
   return [
+    "MARKING AUTHORITY: Confirm the mark against the lecturer assignment brief only.",
     `Assignment: “${opts.briefTitle}”`,
     `LECTURER TOPIC: ${opts.topic}`,
+    opts.courseName ? `COURSE: ${opts.courseName}` : null,
+    opts.courseYear ? `YEAR: ${opts.courseYear}` : null,
     `Gate classification: ${opts.classification}`,
     `Expected discipline: ${opts.expectedDiscipline}`,
     `Detected discipline: ${opts.detectedDiscipline}`,
@@ -341,5 +362,7 @@ export function buildModeratorUserPrompt(opts: {
     ...opts.criterionLines,
     "",
     "Moderate the mark and finalise lecturer-facing prose.",
-  ].join("\n");
+  ]
+    .filter((line) => line != null)
+    .join("\n");
 }

@@ -324,12 +324,18 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 				const actor = await actorOf(request);
 				requireSupervisor(actor);
 				const body = (request.body ?? {}) as {
-					action?: "approve" | "needs_revision";
+					action?: "approve" | "needs_revision" | "remark_only";
 					remark?: string;
 					annotatedHtml?: string;
 				};
-				if (body.action !== "approve" && body.action !== "needs_revision") {
-					throw new ValidationError("Review action must be approve or needs_revision");
+				if (
+					body.action !== "approve" &&
+					body.action !== "needs_revision" &&
+					body.action !== "remark_only"
+				) {
+					throw new ValidationError(
+						"Review action must be approve, needs_revision, or remark_only",
+					);
 				}
 				return ok(
 					reply,

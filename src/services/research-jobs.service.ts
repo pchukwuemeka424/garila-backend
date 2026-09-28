@@ -124,6 +124,7 @@ async function ensureNotebookContextInPrompt(
 		noteIds?: string[];
 		projectIds?: string[];
 	} | null,
+	topic?: string,
 ): Promise<string> {
 	const hasProjects = Boolean(sources?.projectIds?.length);
 	const hasOther =
@@ -138,11 +139,16 @@ async function ensureNotebookContextInPrompt(
 		if (!context) return prompt;
 		// Keep rebuild append modest — client prompts already carry outline/instructions.
 		const clipped = context.length > 28_000 ? `${context.slice(0, 28_000).trimEnd()}\n[Truncated]` : context;
+		const hasUserTopic = Boolean(topic?.trim());
 		return [
 			prompt.trimEnd(),
 			"",
-			"NOTEBOOK-FIRST (hard): The user selected a research notebook library and/or uploaded evidence. Use the FULL folder contents below as primary source material for this deliverable.",
-			"Align title, methods, findings/results, and contributions with this material. Do not invent a different study.",
+			hasUserTopic
+				? "TOPIC+NOTEBOOK (hard): Keep the user’s stated topic/title as the study focus. Use the FULL folder contents below as primary evidence and source material for generating that topic."
+				: "NOTEBOOK-FIRST (hard): The user selected a research notebook library and/or uploaded evidence. Use the FULL folder contents below as primary source material for this deliverable.",
+			hasUserTopic
+				? "Ground methods, findings/results, and contributions in this material. Do not invent unsupported results or replace the user topic with a different study."
+				: "Align title, methods, findings/results, and contributions with this material. Do not invent a different study.",
 			"",
 			"**Selected research library**",
 			"",
@@ -276,6 +282,7 @@ async function runPaperJob(input: {
 			input.prompt,
 			input.userId,
 			input.sources,
+			input.topic,
 		);
 		await chat.sendMessage(prompt, input.userId);
 

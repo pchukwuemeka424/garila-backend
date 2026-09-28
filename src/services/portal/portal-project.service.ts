@@ -838,6 +838,26 @@ export const projectService = {
         : String(page.reviewAnnotatedHtml || page.content || "");
     const reviewedAt = new Date();
 
+    // Draft save: persist feedback + annotations without changing status or notifying.
+    if (input.action === "remark_only") {
+      if (remark) {
+        page.set("reviewRemark", remark.slice(0, 50_000));
+      }
+      if (typeof input.annotatedHtml === "string") {
+        page.set("reviewAnnotatedHtml", input.annotatedHtml);
+      }
+      page.set("reviewedAt", reviewedAt);
+      page.set("reviewedBy", supervisorId);
+      project.markModified("pages");
+      await project.save();
+      return this.getPageForSupervisor(
+        tenantId,
+        projectId,
+        pageId,
+        supervisorId,
+      );
+    }
+
     page.set("reviewStatus", input.action === "approve" ? "approved" : "needs_revision");
     page.set("reviewRemark", remark);
     if (typeof input.annotatedHtml === "string") {

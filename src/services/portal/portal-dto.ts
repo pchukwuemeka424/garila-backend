@@ -36,7 +36,7 @@ export type ImportPagesInput = {
 };
 
 export type ReviewPageInput = {
-	action: "approve" | "needs_revision";
+	action: "approve" | "needs_revision" | "remark_only";
 	remark?: string;
 	annotatedHtml?: string;
 };

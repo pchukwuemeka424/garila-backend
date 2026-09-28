@@ -1065,6 +1065,8 @@ export const aiReviewService = {
 
     const briefTitle = String(briefDoc.title || "").trim();
     const briefInstructions = String(briefDoc.instructions || "").slice(0, 6000);
+    const courseName = String(briefDoc.courseName || "").trim();
+    const courseYear = String(briefDoc.courseYear || "").trim();
     const maxScore =
       typeof briefDoc.maxScore === "number" && briefDoc.maxScore > 0
         ? briefDoc.maxScore
@@ -1090,12 +1092,15 @@ export const aiReviewService = {
     const wordCountMax =
       typeof briefDoc.wordCountMax === "number" ? briefDoc.wordCountMax : null;
 
+    // Brief is the sole grading authority — topic is brief-first.
     const projectTopic =
-      String(project.topic || "").trim() || briefTitle || String(project.title || "");
+      briefTitle ||
+      String(project.topic || "").trim() ||
+      String(project.title || "").trim();
 
-    if (!briefInstructions.trim() && requiredItems.length === 0 && !projectTopic) {
+    if (!briefTitle && !briefInstructions.trim() && requiredItems.length === 0) {
       throw new ValidationError(
-        "Assignment brief is missing topic and instructions. Add topic/instructions on the brief, then retry AI review.",
+        "Assignment brief is missing title and instructions. Add them on the brief, then retry AI review.",
       );
     }
 
@@ -1108,6 +1113,8 @@ export const aiReviewService = {
       maxScore,
       wordCountMin,
       wordCountMax,
+      ...(courseName ? { courseName } : {}),
+      ...(courseYear ? { courseYear } : {}),
     };
 
     const pageHtml = String(page.content || "");
@@ -1265,6 +1272,8 @@ export const aiReviewService = {
                 topic: projectTopic,
                 instructions: briefInstructions,
                 mustIncludeHint,
+                courseName: briefContext.courseName,
+                courseYear: briefContext.courseYear,
                 localTopicScore: pipeline.topicAlignment.score,
                 localTopicCoverage: pipeline.topicAlignment.coverage,
                 localInstructionCoverage:
@@ -1439,6 +1448,8 @@ export const aiReviewService = {
                   instructionCoverage: instructionCompliance.instructionCoverage,
                   rubricHint,
                   localSuggestedMark: pipeline.aiSuggestedScore,
+                  courseName: briefContext.courseName,
+                  courseYear: briefContext.courseYear,
                   text,
                 }),
               },
@@ -1556,6 +1567,8 @@ export const aiReviewService = {
                   alignmentSummary,
                   expectedDiscipline: gate.expectedDiscipline,
                   detectedDiscipline: gate.detectedDiscipline,
+                  courseName: briefContext.courseName,
+                  courseYear: briefContext.courseYear,
                 }),
               },
             ],

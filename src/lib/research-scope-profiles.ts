@@ -14,6 +14,7 @@ export type ResearchScope =
 	| "undergraduate_project";
 
 export type CiteFloor = { min: number; max: number };
+export type WordBudget = { min: number; max: number };
 
 export type ScopeProfile = {
 	scope: ResearchScope;
@@ -22,6 +23,8 @@ export type ScopeProfile = {
 	headings: string[];
 	/** Per-section distinct in-text cite floors (0 = never cite). */
 	citationFloors: Record<string, CiteFloor>;
+	/** Per-section body word budgets (excluding References). */
+	sectionWordTargets: Record<string, WordBudget>;
 	minDistinctCites: number;
 	wordTarget: { min: number; max: number };
 	outlineGuidance: string;
@@ -89,6 +92,24 @@ function floors(entries: Array<[string, number, number]>): Record<string, CiteFl
 	return out;
 }
 
+function words(entries: Array<[string, number, number]>): Record<string, WordBudget> {
+	const out: Record<string, WordBudget> = {};
+	for (const [key, min, max] of entries) {
+		out[key] = { min, max };
+	}
+	return out;
+}
+
+/** Shared section-role rules injected for every deliverable type. */
+const SHARED_SECTION_ROLE_JOBS = [
+	"SECTION LENGTH (hard): Stay within each section’s word budget from the Section word budgets line. Do not let Introduction, Methods, or Results balloon past their maxima.",
+	"INTRODUCTION / Chapter One (hard): Write problem → gap → research questions/objectives → roadmap only — not a mini literature review. Every body paragraph needs ≥1 bank cite; the first paragraph must include a bank cite before the third sentence.",
+	"SYNTHESIS HOMES: Put deep thematic literature in Literature Review, Background, Theoretical Framework, Discussion, Critical Analysis, or Analysis — not in Introduction, Methods, Results, or Conclusion.",
+	"METHODS / Methodology (hard): Keep concise and reproducible; cite prior methods, instruments, or standards only — do not dump thematic literature here.",
+	"RESULTS / Findings / Testing (hard): Evidence-first; minimize literature cites; no thematic lit debate (save that for Discussion/Analysis).",
+	"CONCLUSION / Recommendations / Contributions (hard): Short, contribution-focused; few cites; no new literature themes.",
+];
+
 export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 	assignment: {
 		scope: "assignment",
@@ -102,11 +123,17 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"References",
 		],
 		citationFloors: floors([
-			["Introduction", 5, 8],
+			["Introduction", 6, 10],
 			["Literature Review", 10, 14],
 			["Critical Analysis", 8, 12],
-			["Conclusion", 3, 4],
+			["Conclusion", 2, 4],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Introduction", 250, 400],
+			["Literature Review", 700, 900],
+			["Critical Analysis", 600, 800],
+			["Conclusion", 200, 300],
 		]),
 		minDistinctCites: 20,
 		wordTarget: { min: 1900, max: 2100 },
@@ -116,6 +143,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"BRIEF-FIRST (hard): The user-provided assignment brief is PRIMARY. Explain and satisfy every element in it — numbered questions, tasks, learning outcomes, required sections/parts, theories, cases, marking criteria, word count, and referencing style. Do not drop, merge away, or invent a different assignment question.",
 			"STRUCTURE: If the brief names sections (e.g. Part A/B, Discussion, Recommendations, Appendices), use those bold headings (plus References unless the brief forbids). If the brief lists questions/tasks without headings, create clearly labelled subsections that answer each item in order. Do not collapse all brief tasks into a single Critical Analysis block.",
 			"FALLBACK structure (only when the brief does not specify structure): Title, Introduction, Literature Review, Critical Analysis, Conclusion, References.",
+			"When the brief sets a total word limit, scale fallback section budgets proportionally to that limit.",
 			"VOICE: Write as a doctoral / PhD-level academic — analytical, theory-aware, critically evaluative, discipline-precise. No undergraduate summary tone, bullet-essay padding, or stock AI phrases.",
 			"When using the fallback template: Literature Review is thematic (not paper-by-paper); Critical Analysis evaluates claims and builds a reasoned position with bank cites.",
 			"Never invent completed empirical results, surveys, or datasets. Do not add Abstract, Keywords, Methodology, Methods, Results, or Findings unless the brief explicitly requires a literature-grounded methods discussion (still no fake data).",
@@ -127,6 +155,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Format References according to the selected reference style unless the brief mandates another style. Every References entry must be cited in the body.",
 			"Never write meta-commentary such as “this point is not clearly supported by the cited abstract”. If evidence is thin, omit the claim or hedge in academic prose without mentioning abstracts or fact-checking.",
 			"Prefer prose; place any illustrative synthesis tables in **Literature Review** or **Critical Analysis**; never invent empirical Results unless the brief requires them.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 14_000,
 	},
@@ -137,12 +166,20 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 		citationFloors: floors([
 			["Abstract", 0, 0],
 			["Keywords", 0, 0],
-			["Introduction", 7, 11],
-			["Methods", 3, 6],
-			["Results", 2, 4],
-			["Discussion", 7, 11],
-			["Conclusion", 2, 4],
+			["Introduction", 8, 12],
+			["Methods", 3, 5],
+			["Results", 0, 3],
+			["Discussion", 8, 12],
+			["Conclusion", 2, 3],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 100, 150],
+			["Introduction", 400, 600],
+			["Methods", 500, 700],
+			["Results", 500, 700],
+			["Discussion", 700, 1000],
+			["Conclusion", 150, 250],
 		]),
 		minDistinctCites: 20,
 		wordTarget: { min: 3000, max: 4000 },
@@ -153,6 +190,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Methods must be reproducible but concise; Results report findings only; Discussion interprets against literature.",
 			"Do not expand into thesis chapters or add Title Page / Declaration front matter.",
 			"Place empirical tables/charts/figures in **Results**; study design and protocol tables in **Methods**; conceptual models in **Introduction**; never after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 10_000,
 	},
@@ -163,13 +201,21 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 		citationFloors: floors([
 			["Abstract", 0, 0],
 			["Keywords", 0, 0],
-			["Introduction", 8, 12],
-			["Methods", 4, 8],
-			["Results", 3, 6],
-			["Discussion", 8, 12],
-			["Conclusion", 3, 6],
+			["Introduction", 10, 14],
+			["Methods", 3, 6],
+			["Results", 0, 3],
+			["Discussion", 10, 16],
+			["Conclusion", 2, 4],
 			["Acknowledgments", 0, 0],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 150, 250],
+			["Introduction", 500, 750],
+			["Methods", 700, 1000],
+			["Results", 700, 1000],
+			["Discussion", 1200, 1800],
+			["Conclusion", 250, 400],
 		]),
 		minDistinctCites: 25,
 		wordTarget: { min: 4000, max: 6000 },
@@ -177,9 +223,10 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Peer-reviewed journal article: IMRaD, thematic literature synthesis in Introduction/Discussion, reproducible methods.",
 		sectionJobs: [
 			"Follow IMRaD strictly: Introduction → Methods → Results → Discussion → Conclusion.",
-			"Synthesize literature thematically in Introduction and Discussion — not a standalone Literature Review section.",
-			"Methods must be reproducible; Results are evidence-only; Discussion interprets vs literature with explicit Limitations.",
+			"Introduction establishes gap with selective cites only; deep thematic literature synthesis belongs in Discussion — not a standalone Literature Review section and not a mini lit-review inside Introduction.",
+			"Methods must be reproducible and concise; Results are evidence-only; Discussion interprets vs literature with explicit Limitations.",
 			"Place empirical tables/charts/figures in **Results**; study design and protocol tables in **Methods**; conceptual models in **Introduction**; never after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 12_000,
 	},
@@ -205,13 +252,24 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			["Introduction", 5, 8],
 			["Background", 8, 12],
 			["Objectives", 0, 2],
-			["Methods", 3, 5],
-			["Findings", 1, 3],
+			["Methods", 2, 4],
+			["Findings", 0, 3],
 			["Analysis", 5, 9],
 			["Recommendations", 2, 4],
 			["Conclusion", 2, 3],
 			["Appendices", 0, 0],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Executive Summary", 200, 300],
+			["Introduction", 300, 450],
+			["Background", 600, 900],
+			["Objectives", 100, 200],
+			["Methods", 400, 600],
+			["Findings", 500, 700],
+			["Analysis", 500, 800],
+			["Recommendations", 250, 400],
+			["Conclusion", 150, 250],
 		]),
 		minDistinctCites: 20,
 		wordTarget: { min: 3000, max: 5000 },
@@ -222,6 +280,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"**Recommendations** must be actionable, numbered or clearly itemised, and grounded in Findings/Analysis.",
 			"Do not force journal IMRaD labels (no Literature Review / Results / Discussion pair).",
 			"Place empirical tables/charts/figures in **Findings**; methods tables in **Methods**; synthesis tables in **Background**; never after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 10_000,
 	},
@@ -248,12 +307,24 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			["Problem Statement", 4, 6],
 			["Objectives", 0, 2],
 			["Literature Review", 10, 16],
-			["Methodology", 4, 8],
+			["Methodology", 3, 6],
 			["Timeline", 0, 0],
 			["Expected Outcomes", 1, 3],
 			["Budget", 0, 0],
 			["Conclusion", 2, 4],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 150, 250],
+			["Introduction", 250, 400],
+			["Problem Statement", 200, 350],
+			["Objectives", 100, 200],
+			["Literature Review", 700, 1200],
+			["Methodology", 400, 700],
+			["Timeline", 100, 200],
+			["Expected Outcomes", 150, 250],
+			["Budget", 100, 200],
+			["Conclusion", 150, 250],
 		]),
 		minDistinctCites: 20,
 		wordTarget: { min: 2000, max: 4000 },
@@ -264,6 +335,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Timeline and Budget are forward-looking plans; Expected Outcomes state anticipated contributions, not observed data.",
 			"Never add Results, Findings, Results / Analysis, or Critical Analysis sections.",
 			"Place planned protocol/instrument tables in **Methodology**; synthesis tables and conceptual models in **Literature Review**; never invent Results or place visuals after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 10_000,
 	},
@@ -290,12 +362,24 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			["Problem Statement", 6, 10],
 			["Objectives", 1, 3],
 			["Literature Review", 14, 22],
-			["Methodology", 6, 10],
+			["Methodology", 4, 8],
 			["Timeline", 0, 0],
 			["Expected Outcomes", 2, 4],
 			["Budget", 0, 0],
-			["Conclusion", 3, 5],
+			["Conclusion", 2, 4],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 200, 300],
+			["Introduction", 400, 600],
+			["Problem Statement", 350, 500],
+			["Objectives", 150, 250],
+			["Literature Review", 1200, 1800],
+			["Methodology", 700, 1000],
+			["Timeline", 200, 350],
+			["Expected Outcomes", 250, 400],
+			["Budget", 200, 350],
+			["Conclusion", 200, 300],
 		]),
 		minDistinctCites: 30,
 		wordTarget: { min: 4000, max: 6000 },
@@ -306,6 +390,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Never invent completed empirical Results or Findings.",
 			"Do not collapse into journal IMRaD or thesis chapters.",
 			"Place planned protocol/instrument tables in **Methodology**; synthesis tables and conceptual models in **Literature Review**; never invent Results or place visuals after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 12_000,
 	},
@@ -334,15 +419,25 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			["Abstract", 0, 0],
 			["Acknowledgments", 0, 0],
 			["Table of Contents", 0, 0],
-			["Chapter One: Introduction", 6, 10],
+			["Chapter One: Introduction", 8, 12],
 			["Chapter Two: Literature Review", 12, 18],
 			["Chapter Three: System Analysis and Methodology", 4, 8],
 			["Chapter Four: System Design and Implementation", 2, 4],
-			["Chapter Five: Testing and Results", 2, 4],
-			["Chapter Six: Discussion", 6, 10],
+			["Chapter Five: Testing and Results", 0, 3],
+			["Chapter Six: Discussion", 8, 12],
 			["Chapter Seven: Conclusion and Recommendations", 3, 5],
 			["Appendices", 0, 0],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 150, 250],
+			["Chapter One: Introduction", 700, 1000],
+			["Chapter Two: Literature Review", 1500, 2000],
+			["Chapter Three: System Analysis and Methodology", 900, 1200],
+			["Chapter Four: System Design and Implementation", 900, 1200],
+			["Chapter Five: Testing and Results", 800, 1100],
+			["Chapter Six: Discussion", 800, 1100],
+			["Chapter Seven: Conclusion and Recommendations", 400, 600],
 		]),
 		minDistinctCites: 25,
 		wordTarget: { min: 6000, max: 8000 },
@@ -354,6 +449,7 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Front matter (Title Page, Declaration, Abstract, Acknowledgments, Table of Contents) stays citation-free where floors are 0.",
 			"Chapter Five reports testing/results; Chapter Six interprets; Chapter Seven concludes with recommendations.",
 			"Place empirical visuals in **Chapter Five: Testing and Results**; design diagrams in **Chapter Four**; protocol/analysis tables in **Chapter Three**; synthesis tables in **Chapter Two**; never after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
 		maxTokens: 16_000,
 	},
@@ -382,13 +478,23 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			["Table of Contents", 0, 0],
 			["Introduction", 10, 14],
 			["Literature Review", 18, 28],
-			["Methodology", 6, 10],
-			["Findings / Results", 3, 6],
+			["Methodology", 5, 8],
+			["Findings / Results", 0, 4],
 			["Discussion", 10, 16],
-			["Conclusion", 3, 6],
+			["Conclusion", 2, 4],
 			["Recommendations", 2, 4],
 			["Appendices", 0, 0],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 250, 350],
+			["Introduction", 900, 1200],
+			["Literature Review", 2200, 3000],
+			["Methodology", 1200, 1600],
+			["Findings / Results", 1200, 1600],
+			["Discussion", 1400, 1800],
+			["Conclusion", 400, 600],
+			["Recommendations", 300, 500],
 		]),
 		minDistinctCites: 40,
 		wordTarget: { min: 8000, max: 10000 },
@@ -400,8 +506,9 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"Literature Review is substantial and thematic; Methodology is reproducible; Findings / Results are evidence-only.",
 			"Recommendations are distinct from Conclusion and actionable for practice or further research.",
 			"Place empirical tables/charts/figures in **Findings / Results**; conceptual models and synthesis tables in **Literature Review**; protocol tables in **Methodology**; never after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
-		maxTokens: 16_000,
+		maxTokens: 20_000,
 	},
 	dissertation: {
 		scope: "dissertation",
@@ -436,13 +543,24 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			["Introduction", 12, 18],
 			["Literature Review", 25, 40],
 			["Theoretical Framework", 10, 16],
-			["Methodology", 8, 12],
-			["Results", 4, 8],
+			["Methodology", 6, 10],
+			["Results", 0, 4],
 			["Discussion", 12, 20],
-			["Conclusion", 4, 8],
+			["Conclusion", 2, 4],
 			["Contributions", 3, 6],
 			["Appendices", 0, 0],
 			["References", 0, 0],
+		]),
+		sectionWordTargets: words([
+			["Abstract", 300, 500],
+			["Introduction", 1000, 1400],
+			["Literature Review", 2500, 3200],
+			["Theoretical Framework", 1000, 1400],
+			["Methodology", 1200, 1600],
+			["Results", 1200, 1600],
+			["Discussion", 1500, 2000],
+			["Conclusion", 400, 600],
+			["Contributions", 300, 500],
 		]),
 		minDistinctCites: 50,
 		wordTarget: { min: 10000, max: 12000 },
@@ -454,8 +572,9 @@ export const RESEARCH_SCOPE_PROFILES: Record<ResearchScope, ScopeProfile> = {
 			"**Theoretical Framework** must be distinct from Literature Review; **Contributions** must state novel scholarly contributions.",
 			"Results are evidence-only; Discussion interprets against literature and theory.",
 			"Place empirical tables/charts/figures in **Results**; conceptual models in **Theoretical Framework**; synthesis tables in **Literature Review**; never after References.",
+			...SHARED_SECTION_ROLE_JOBS,
 		],
-		maxTokens: 16_000,
+		maxTokens: 24_000,
 	},
 };
 
@@ -506,6 +625,16 @@ export function formatCitationFloorsForPrompt(profile: ScopeProfile): string {
 	return parts.join("; ");
 }
 
+export function formatSectionWordTargetsForPrompt(profile: ScopeProfile): string {
+	const parts: string[] = [];
+	for (const heading of profile.headings) {
+		const budget = profile.sectionWordTargets[heading];
+		if (!budget) continue;
+		parts.push(`${heading} ${budget.min.toLocaleString()}–${budget.max.toLocaleString()}`);
+	}
+	return parts.join("; ");
+}
+
 export function formatAcademicIntegrityRules(profile: ScopeProfile): string[] {
 	const min = profile.minDistinctCites;
 	const lines = [
@@ -519,7 +648,7 @@ export function formatAcademicIntegrityRules(profile: ScopeProfile): string[] {
 		"Citation scope (hard): every major factual claim needs a bank in-text cite; prose must not exceed what that cite’s abstract supports; no uncited filler outside Methods/Results study evidence; omit points that cannot be grounded. Do not fall back to uncited general knowledge.",
 		`References list: format in the selected reference style (1:1 match — every in-text bank cite has a References entry, and every References entry is cited in the body). Cite at least ${min} distinct bank papers in both the body and References. Use the retrieval bank until this floor is met; only if retrieval returns fewer than ${min} papers may the list equal the full bank (still every entry cited in-text). Never invent fillers or pad uncited entries. A References section that invents sources or lists uncited papers is invalid.`,
 		"Never insert editorial asides about abstracts, fact-checking, or unsupported cites (e.g. “this point is not clearly supported by the cited abstract”). Hedge in academic language or omit the claim.",
-		"Abstract / Executive Summary / front matter: zero in-text citations where the profile marks 0; those sections may only summarize content the body later grounds in cites or study evidence.",
+		"Abstract / Executive Summary / front matter: zero in-text citations where the profile marks 0; those sections may only summarize content that the body later grounds in cites or study evidence.",
 		"Strong academic English: discipline-precise, argumentative, non-formulaic; prefer analytical verbs over vague intensifiers; ban stock AI phrases (e.g. “rapidly evolving”, “delve into”, “landscape of”, “it is worth noting”).",
 		"Anti-repetition: do not recycle the same summary across overview, introduction, discussion, and conclusion sections; vary wording within paragraphs.",
 		"Do not use hash (#) Markdown headings or horizontal rules (---, --).",
@@ -538,6 +667,7 @@ export function formatStructureInstructions(profile: ScopeProfile): string[] {
 	const hasKeywords = profile.headings.includes("Keywords");
 	const hasStudyArea = profile.headings.includes("Study area");
 	const isAssignment = profile.scope === "assignment";
+	const sectionWordLine = formatSectionWordTargetsForPrompt(profile);
 	const lines = [
 		isAssignment
 			? "Write a complete PhD-level academic Assignment that fully explains and satisfies the user-provided brief (not a generic journal article)."
@@ -545,6 +675,13 @@ export function formatStructureInstructions(profile: ScopeProfile): string[] {
 		`Target body length: ${profile.wordTarget.min.toLocaleString()}–${profile.wordTarget.max.toLocaleString()} words excluding references${
 			isAssignment ? " — unless the brief sets a different word count, which then controls." : "."
 		}`,
+		...(sectionWordLine
+			? [
+					isAssignment
+						? `Section word budgets for the fallback template (hard, excluding References): ${sectionWordLine}. If the brief sets a different total word count, scale these budgets proportionally; if the brief names different sections, keep each section concise and balanced rather than letting Introduction dominate.`
+						: `Section word budgets (hard, excluding References): ${sectionWordLine}.`,
+				]
+			: []),
 		isAssignment
 			? `Section order (brief wins): if the assignment brief names sections, parts, or ordered tasks, use those as bold-only headings (plus References unless forbidden). Only if the brief does not specify structure, use this fallback order: ${formatHeadingsForPrompt(profile)}.`
 			: `Use this exact section order with bold-only headings on their own lines: ${formatHeadingsForPrompt(profile)}.`,
@@ -602,4 +739,3 @@ export function literatureBankFetchLimit(scope: ResearchScope | string | null | 
 	if (profile.scope === "assignment") return 36;
 	return Math.max(30, profile.minDistinctCites);
 }
-
