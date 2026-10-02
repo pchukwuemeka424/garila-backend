@@ -315,16 +315,30 @@ export class ChatService {
 
 		if (userId) {
 			await assertStudentHasTokenBalance(userId);
-			const user = await UserModel.findById(userId).select("role faculty").lean();
+			const user = await UserModel.findById(userId).select("role faculty universityId").lean();
 			if (user) {
 				const session = await SessionModel.findById(this.sessionId).lean();
 				const workflow = session?.workflow ?? "chat";
-				const policyResult = await evaluatePolicy({
-					scope: "feature",
-					target: workflow,
-					role: user.role ?? "lecturer",
-					faculty: (user as Record<string, unknown>).faculty as string | null,
-				});
+				const policyTarget =
+					workflow === "chat" || !workflow ? "research_assistant" : workflow;
+				const tenantScope = user.universityId
+					? {
+							kind: "university" as const,
+							actorId: userId,
+							role: user.role ?? "lecturer",
+							universityId: user.universityId.toString(),
+						}
+					: undefined;
+				const policyResult = await evaluatePolicy(
+					{
+						scope: "feature",
+						target: policyTarget,
+						role: user.role ?? "lecturer",
+						faculty: (user as Record<string, unknown>).faculty as string | null,
+					},
+					tenantScope,
+					userId,
+				);
 				if (policyResult.effect === "blocked") {
 					this.emit({ type: "error", error: `Access denied: ${policyResult.reason}` });
 					throw new Error(`Policy blocked: ${policyResult.reason}`);

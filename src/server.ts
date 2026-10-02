@@ -195,6 +195,7 @@ import {
 	normalizeApprovalDefaults,
 } from "./services/admin-approvals.service.js";
 import { getGovernanceDashboard } from "./services/admin-governance.service.js";
+import { recordAiGovernanceUse } from "./services/ai-governance-telemetry.service.js";
 import {
 	createPolicy,
 	deletePolicy,
@@ -820,6 +821,14 @@ export async function startServer(port: number): Promise<void> {
 					scope: scope,
 					outline: result.outline,
 				});
+				void recordAiGovernanceUse({
+					userId,
+					surface: "research_outline",
+					summary: `Generated research outline for “${body.idea.title.trim()}”`,
+					outputRef: `research-outline:${ideaId}`,
+					outputTitle: body.idea.title.trim(),
+					recordIntegrity: true,
+				});
 			}
 
 			return {
@@ -888,6 +897,17 @@ export async function startServer(port: number): Promise<void> {
 			let tokenQuota;
 			if (userId && result.usage?.totalTokens) {
 				tokenQuota = await deductStudentTokens(userId, result.usage.totalTokens);
+			}
+
+			if (userId) {
+				void recordAiGovernanceUse({
+					userId,
+					surface: "research_ideas",
+					summary: `Generated research ideas for “${body.topic.trim()}”`,
+					outputRef: `research-ideas:${body.disciplineLabel.trim()}:${body.topic.trim().slice(0, 80)}`,
+					outputTitle: body.topic.trim(),
+					recordIntegrity: true,
+				});
 			}
 
 			return {
@@ -969,6 +989,14 @@ export async function startServer(port: number): Promise<void> {
 				figureDocumentIds: body.figureDocumentIds,
 				visualizationMarkdown: body.visualizationMarkdown,
 				sources: body.sources,
+			});
+			void recordAiGovernanceUse({
+				userId,
+				surface: "research_generate",
+				summary: "Started live paper generation job",
+				outputRef: `research-job:${job.id}`,
+				outputTitle: body.topic?.trim() || "Paper generation",
+				recordIntegrity: true,
 			});
 			return { job };
 		} catch (error) {
@@ -2505,7 +2533,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/users", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "users", "create");
 			const body = request.body as {
 				name?: string;
 				email?: string;
@@ -2550,7 +2578,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/users/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "users", "edit");
 			const body = request.body as Partial<{
 				name: string;
 				email: string;
@@ -2578,7 +2606,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.delete<{ Params: { id: string } }>("/api/admin/users/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "users", "delete");
 			const deleted = await adminDeleteUser(request.params.id, scope);
 			if (!deleted) return reply.code(404).send({ error: "User not found." });
 			await recordAuditEvent({
@@ -2692,7 +2720,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/tokens/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "tokens", "edit");
 			const body = request.body as {
 				reset?: boolean;
 				tokensUsed?: number;
@@ -2943,7 +2971,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get("/api/admin/governance", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "governance_hub", "view");
 			return { dashboard: await getGovernanceDashboard(scope) };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
@@ -2956,7 +2984,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get("/api/admin/analytics", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "analytics", "view");
 			return { analytics: await getUsageAnalytics(scope) };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
@@ -2969,8 +2997,8 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get("/api/admin/overview", async (request, reply) => {
 		try {
-			await requireAdmin(request.headers.authorization);
-			return { overview: await getPlatformOverview() };
+			const scope = await requireAdminScope(request.headers.authorization);
+			return { overview: await getPlatformOverview(scope) };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
 				return reply.code(error.statusCode).send({ error: error.message });
@@ -2996,7 +3024,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/policies", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "policies", "create");
 			const body = request.body as {
 				name?: string;
 				description?: string;
@@ -3038,7 +3066,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/policies/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "policies", "edit");
 			const body = request.body as Partial<{
 				name: string;
 				description: string;
@@ -3064,7 +3092,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.delete<{ Params: { id: string } }>("/api/admin/policies/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "policies", "delete");
 			const deleted = await deletePolicy(request.params.id, scope.actorId, scope);
 			if (!deleted) return reply.code(404).send({ error: "Policy not found." });
 			return { ok: true };
@@ -3079,7 +3107,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/policies/evaluate", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "policies", "view");
 			const body = request.body as {
 				scope?: "feature" | "dataset" | "tool" | "use_case" | "content";
 				target?: string;
@@ -3179,7 +3207,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post<{ Params: { id: string } }>("/api/admin/audit/:id/flag", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "audit", "edit");
 			const body = request.body as {
 				reason?: string;
 				severity?: "info" | "low" | "medium" | "high" | "critical";
@@ -3236,7 +3264,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/reports/generate", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "reports", "create");
 			const body = (request.body ?? {}) as {
 				audience?: "management" | "senate" | "both" | "external_auditors";
 				periodStart?: string;
@@ -3300,7 +3328,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/incidents", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "incidents", "create");
 			const body = request.body as {
 				title?: string;
 				description?: string;
@@ -3357,7 +3385,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/incidents/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "incidents", "edit");
 			const body = request.body as Record<string, unknown>;
 			const incident = await updateIncident(request.params.id, body as never, scope.actorId, scope);
 			if (!incident) return reply.code(404).send({ error: "Incident not found." });
@@ -3399,7 +3427,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/alerts", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "alerts", "create");
 			const body = request.body as {
 				title?: string;
 				summary?: string;
@@ -3443,7 +3471,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/alerts/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "alerts", "edit");
 			const body = request.body as Record<string, unknown>;
 			const alert = await updateAlert(request.params.id, body as never, scope.actorId, scope);
 			if (!alert) return reply.code(404).send({ error: "Alert not found." });
@@ -3497,7 +3525,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/contributions", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "contributions", "create");
 			const body = request.body as Record<string, unknown>;
 			if (!body.outputRef || !body.outputTitle) {
 				return reply.code(400).send({ error: "outputRef and outputTitle are required." });
@@ -3517,7 +3545,7 @@ export async function startServer(port: number): Promise<void> {
 		"/api/admin/contributions/:id",
 		async (request, reply) => {
 			try {
-				const scope = await requireAdminScope(request.headers.authorization);
+				const scope = await requireFeatureAccess(request.headers.authorization, "contributions", "edit");
 				const admin = await UserModel.findById(scope.actorId).select("name").lean();
 				const body = request.body as Record<string, unknown>;
 				const statement = await verifyContributionStatement(
@@ -3569,7 +3597,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/provenance", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "provenance", "create");
 			const body = request.body as Record<string, unknown>;
 			if (!body.outputRef || !body.outputTitle) {
 				return reply.code(400).send({ error: "outputRef and outputTitle are required." });
@@ -3587,7 +3615,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/provenance/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "provenance", "edit");
 			const admin = await UserModel.findById(scope.actorId).select("name").lean();
 			const body = request.body as Record<string, unknown>;
 			const record = await reviewProvenanceRecord(
@@ -3626,7 +3654,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/privacy", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "privacy", "create");
 			const body = request.body as Record<string, unknown>;
 			if (!body.name || !body.dataClass) {
 				return reply.code(400).send({ error: "name and dataClass are required." });
@@ -3644,7 +3672,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.patch<{ Params: { id: string } }>("/api/admin/privacy/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "privacy", "edit");
 			const body = request.body as Record<string, unknown>;
 			const setting = await updatePrivacySetting(request.params.id, body as never, scope.actorId, scope);
 			if (!setting) return reply.code(404).send({ error: "Privacy setting not found." });
@@ -3660,7 +3688,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.delete<{ Params: { id: string } }>("/api/admin/privacy/:id", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "privacy", "delete");
 			const deleted = await deletePrivacySetting(request.params.id, scope.actorId, scope);
 			if (!deleted) return reply.code(404).send({ error: "Privacy setting not found." });
 			return { ok: true };
@@ -3695,7 +3723,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/retention/policies", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "retention", "create");
 			const body = request.body as Record<string, unknown>;
 			if (!body.name || !body.dataCategory || body.retainDays == null) {
 				return reply
@@ -3717,7 +3745,7 @@ export async function startServer(port: number): Promise<void> {
 		"/api/admin/retention/policies/:id",
 		async (request, reply) => {
 			try {
-				const scope = await requireAdminScope(request.headers.authorization);
+				const scope = await requireFeatureAccess(request.headers.authorization, "retention", "edit");
 				const body = request.body as Record<string, unknown>;
 				const policy = await updateRetentionPolicy(
 					request.params.id,
@@ -3741,7 +3769,7 @@ export async function startServer(port: number): Promise<void> {
 		"/api/admin/retention/policies/:id",
 		async (request, reply) => {
 			try {
-				const scope = await requireAdminScope(request.headers.authorization);
+				const scope = await requireFeatureAccess(request.headers.authorization, "retention", "delete");
 				const deleted = await deleteRetentionPolicy(request.params.id, scope.actorId, scope);
 				if (!deleted) return reply.code(404).send({ error: "Retention policy not found." });
 				return { ok: true };
@@ -3757,7 +3785,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/retention/deletion-requests", async (request, reply) => {
 		try {
-			const scope = await requireAdminScope(request.headers.authorization);
+			const scope = await requireFeatureAccess(request.headers.authorization, "retention", "create");
 			const body = request.body as Record<string, unknown>;
 			if (!body.subjectName || !body.subjectEmail) {
 				return reply.code(400).send({ error: "subjectName and subjectEmail are required." });
@@ -3777,7 +3805,7 @@ export async function startServer(port: number): Promise<void> {
 		"/api/admin/retention/deletion-requests/:id",
 		async (request, reply) => {
 			try {
-				const scope = await requireAdminScope(request.headers.authorization);
+				const scope = await requireFeatureAccess(request.headers.authorization, "retention", "edit");
 				const body = request.body as Record<string, unknown>;
 				const deletionRequest = await updateDeletionRequest(
 					request.params.id,
@@ -3889,12 +3917,25 @@ export async function startServer(port: number): Promise<void> {
 		console.log(`GARIL AI API: http://0.0.0.0:${port}  (health: /api/health)`);
 	}
 
+	let shuttingDown = false;
 	const shutdown = async () => {
-		await chat.abort();
-		await app.close();
-		await disconnectMongo();
+		if (shuttingDown) return;
+		shuttingDown = true;
+		// Force-exit if graceful close hangs (open websockets / Mongo), so nodemon can respawn.
+		const forceTimer = setTimeout(() => process.exit(0), 2500);
+		forceTimer.unref?.();
+		try {
+			await chat.abort();
+			await app.close();
+			await disconnectMongo();
+		} catch {
+			/* best-effort shutdown during hot reload */
+		} finally {
+			clearTimeout(forceTimer);
+			process.exit(0);
+		}
 	};
 
-	process.on("SIGINT", () => void shutdown().then(() => process.exit(0)));
-	process.on("SIGTERM", () => void shutdown().then(() => process.exit(0)));
+	process.on("SIGINT", () => void shutdown());
+	process.on("SIGTERM", () => void shutdown());
 }

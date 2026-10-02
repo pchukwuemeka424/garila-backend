@@ -1,8 +1,12 @@
 {
   "watch": ["src", "prompts"],
-  "ext": "ts,json,md",
-  "ignore": ["dist/**", "src/**/*.test.ts"],
-  "exec": "npx tsx src/index.ts",
+  "ext": "ts,md",
+  "ignore": ["dist/**", "src/**/*.test.ts", "**/*.map"],
+  "execMap": {
+    "ts": "tsx"
+  },
+  "exec": "tsx src/index.ts",
   "signal": "SIGTERM",
-  "delay": 500
+  "delay": 1500,
+  "legacyWatch": false
 }

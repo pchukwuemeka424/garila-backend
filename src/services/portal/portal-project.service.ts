@@ -1200,51 +1200,22 @@ export const projectService = {
     const pages = [...(project.pages || [])].sort(
       (a, b) => (a.order ?? 0) - (b.order ?? 0),
     );
-    const chapters = await chapterRepository.listByProject(tenantId, id);
-
-    const escape = (s: string) =>
-      s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-
-    const pageHtml = pages
-      .map(
-        (p) =>
-          `<section><h2>${escape(p.title)}</h2>${p.content || "<p></p>"}</section>`,
-      )
-      .join("\n");
-
-    const chapterMeta = chapters
-      .map(
-        (c) =>
-          `<li>${escape(c.title)} — ${escape(String(c.status))}</li>`,
-      )
-      .join("");
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<title>${escape(project.title)}</title>
-<style>
-  body{font-family:Georgia,serif;max-width:800px;margin:2rem auto;padding:0 1rem;line-height:1.6;color:#111}
-  h1{font-size:1.8rem} h2{margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.3rem}
-  .meta{color:#555;font-size:.9rem}
-</style>
-</head>
-<body>
-  <h1>${escape(project.title)}</h1>
-  <p class="meta">Type: ${escape(String(project.projectType))} · Topic status: ${escape(String(project.topicStatus || "draft"))} · Exported ${new Date().toISOString()}</p>
-  ${project.abstract ? `<section><h2>Abstract</h2><p>${escape(project.abstract)}</p></section>` : ""}
-  ${chapterMeta ? `<section><h2>Chapter status</h2><ul>${chapterMeta}</ul></section>` : ""}
-  ${pageHtml || "<p><em>No pages exported.</em></p>"}
-</body>
-</html>`;
 
     const safeName = String(project.title)
       .replace(/[^\w\-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_|_$/g, "")
       .slice(0, 60);
-    return { html, filename: `${safeName || "thesis"}_package.html` };
+
+    return {
+      title: String(project.title || "Untitled project"),
+      projectType: String(project.projectType || ""),
+      abstract: String(project.abstract || ""),
+      pages: pages.map((p) => ({
+        title: String(p.title || "Untitled"),
+        content: String(p.content || ""),
+      })),
+      filename: `${safeName || "project"}.docx`,
+    };
   },
 };

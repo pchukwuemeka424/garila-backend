@@ -1,3 +1,8 @@
+import { AuditLogModel } from "../db/models/AuditLog.js";
+import { PortalAiReviewModel } from "../db/models/PortalAiReview.js";
+import { PortalProjectModel } from "../db/models/PortalProject.js";
+import { ResearchDatasetModel } from "../db/models/ResearchDataset.js";
+import { ResearchDocumentModel } from "../db/models/ResearchDocument.js";
 import { ResearchIdeaSessionModel } from "../db/models/ResearchIdeaSession.js";
 import { ResearchProjectModel } from "../db/models/ResearchProject.js";
 import { SavedResearchModel } from "../db/models/SavedResearch.js";
@@ -29,6 +34,10 @@ export type UsageAnalytics = {
 		ideaSessions: number;
 		papers: number;
 		projects: number;
+		portalProjects: number;
+		chapterAiReviews: number;
+		notebookAssets: number;
+		portalAiChats: number;
 	};
 	byFaculty: UsageBreakdownRow[];
 	byDepartment: UsageBreakdownRow[];
@@ -104,12 +113,62 @@ export async function getUsageAnalytics(scope?: AdminScope): Promise<UsageAnalyt
 	const userIds = users.map((u) => u._id);
 	const activityFilter =
 		scope?.kind === "university" ? { userId: { $in: userIds } } : {};
+	const universityFilter = scopeFilter(scope);
 
-	const [sessions, ideaSessions, papers, projects] = await Promise.all([
+	const [
+		sessions,
+		ideaSessions,
+		papers,
+		projects,
+		portalProjects,
+		chapterAiReviews,
+		notebookDocs,
+		notebookDatasets,
+		portalAiChatAudits,
+		chapterAiAudits,
+		pageSummaryAudits,
+		researchIdeaAudits,
+		researchOutlineAudits,
+		researchGenerateAudits,
+	] = await Promise.all([
 		SessionModel.find(activityFilter).select("userId").lean(),
 		ResearchIdeaSessionModel.find(activityFilter).select("userId").lean(),
 		SavedResearchModel.find(activityFilter).select("userId").lean(),
 		ResearchProjectModel.find(activityFilter).select("userId").lean(),
+		PortalProjectModel.countDocuments(universityFilter),
+		PortalAiReviewModel.countDocuments(universityFilter),
+		ResearchDocumentModel.countDocuments(activityFilter),
+		ResearchDatasetModel.countDocuments(activityFilter),
+		AuditLogModel.countDocuments({
+			...universityFilter,
+			action: "ai.portal_ai_chat",
+			category: "ai_use",
+		}),
+		AuditLogModel.countDocuments({
+			...universityFilter,
+			action: "ai.chapter_ai_reviewer",
+			category: "ai_use",
+		}),
+		AuditLogModel.countDocuments({
+			...universityFilter,
+			action: "ai.portal_page_summary",
+			category: "ai_use",
+		}),
+		AuditLogModel.countDocuments({
+			...universityFilter,
+			action: "ai.research_ideas",
+			category: "ai_use",
+		}),
+		AuditLogModel.countDocuments({
+			...universityFilter,
+			action: "ai.research_outline",
+			category: "ai_use",
+		}),
+		AuditLogModel.countDocuments({
+			...universityFilter,
+			action: "ai.research_generate",
+			category: "ai_use",
+		}),
 	]);
 
 	const orgByUser = new Map<string, OrgDimensions & { role: string; status: string; tokensUsed: number }>();
@@ -173,6 +232,8 @@ export async function getUsageAnalytics(scope?: AdminScope): Promise<UsageAnalyt
 		bump(byRole, org.role, org.role, patch);
 	}
 
+	const notebookAssets = notebookDocs + notebookDatasets;
+
 	return {
 		totals: {
 			users: users.length,
@@ -182,6 +243,10 @@ export async function getUsageAnalytics(scope?: AdminScope): Promise<UsageAnalyt
 			ideaSessions: ideaSessions.length,
 			papers: papers.length,
 			projects: projects.length,
+			portalProjects,
+			chapterAiReviews,
+			notebookAssets,
+			portalAiChats: portalAiChatAudits,
 		},
 		byFaculty: finalize(byFaculty),
 		byDepartment: finalize(byDepartment),
@@ -190,9 +255,16 @@ export async function getUsageAnalytics(scope?: AdminScope): Promise<UsageAnalyt
 		byRole: finalize(byRole),
 		byFeature: [
 			{ feature: "research-sessions", label: "Research chat / papers", count: sessions.length },
-			{ feature: "research-ideas", label: "Research ideas", count: ideaSessions.length },
+			{ feature: "research-ideas", label: "Research ideas", count: Math.max(ideaSessions.length, researchIdeaAudits) },
+			{ feature: "research-outline", label: "Research outlines", count: researchOutlineAudits },
+			{ feature: "research-generate", label: "Live paper generation", count: researchGenerateAudits },
 			{ feature: "saved-papers", label: "Saved papers", count: papers.length },
+			{ feature: "research-notebook", label: "Notebook assets", count: notebookAssets },
 			{ feature: "research-projects", label: "Research projects", count: projects.length },
+			{ feature: "portal-projects", label: "Portal projects", count: portalProjects },
+			{ feature: "portal-ai-chat", label: "Project AI assist", count: portalAiChatAudits },
+			{ feature: "portal-page-summary", label: "Page AI summaries", count: pageSummaryAudits },
+			{ feature: "chapter-ai-reviewer", label: "Chapter AI reviews", count: Math.max(chapterAiReviews, chapterAiAudits) },
 		],
 	};
 }

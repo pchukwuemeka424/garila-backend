@@ -12,6 +12,8 @@ import { getAlertStats } from "./admin-alerts.service.js";
 import { getIncidentStats } from "./admin-incidents.service.js";
 import { getContributionStats } from "./admin-contributions.service.js";
 import { getTokenAdminStats } from "./admin-tokens.service.js";
+import type { AdminScope } from "../lib/require-admin.js";
+import { scopeFilter } from "../lib/admin-scope.js";
 
 const TOKEN_COST_PER_1K = 0.002; // estimated USD
 
@@ -65,11 +67,11 @@ export type PlatformOverview = {
 		highRiskActivities: number;
 		totalTokensUsed: number;
 		estimatedAiCost: number;
-		systemHealth: "healthy" | "degraded" | "down";
-		aiServiceStatus: "operational" | "degraded" | "outage";
+		systemHealth: "healthy" | "degraded" | "down" | "unknown";
+		aiServiceStatus: "operational" | "degraded" | "outage" | "not_monitored";
 		storageUsageGb: number;
-		apiStatus: "operational" | "degraded" | "outage";
-		platformUptimePercent: number;
+		apiStatus: "operational" | "degraded" | "outage" | "not_monitored";
+		platformUptimePercent: number | null;
 	};
 	charts: {
 		dailyAiUsage: Array<{ name: string; value: number }>;
@@ -83,10 +85,26 @@ export type PlatformOverview = {
 	};
 };
 
-export async function getPlatformOverview(): Promise<PlatformOverview> {
+export async function getPlatformOverview(scope?: AdminScope): Promise<PlatformOverview> {
 	const today = startOfDay();
 	const week = startOfWeek();
 	const month = startOfMonth();
+	const uniFilter = scopeFilter(scope);
+	const userFilter = scopeFilter(scope);
+
+	const usersInScope = await UserModel.find(userFilter).select("_id").lean();
+	const userIds = usersInScope.map((u) => u._id);
+	const activityFilter =
+		scope?.kind === "university" ? { userId: { $in: userIds } } : {};
+
+	const scopedSessions =
+		scope?.kind === "university"
+			? await SessionModel.find(activityFilter).select("_id").lean()
+			: null;
+	const messageFilter =
+		scopedSessions != null
+			? { sessionId: { $in: scopedSessions.map((s) => s._id) } }
+			: {};
 
 	const [
 		totalUsers,
@@ -109,26 +127,26 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
 		violationsByDay,
 		sessionsByModel,
 	] = await Promise.all([
-		UserModel.countDocuments(),
-		UserModel.countDocuments({ lastActiveAt: { $gte: today } }),
-		UserModel.countDocuments({ createdAt: { $gte: week } }),
-		UserModel.find().select("faculty department programme tokensUsed createdAt").lean(),
-		MessageModel.countDocuments({ role: "user", createdAt: { $gte: today } }),
-		MessageModel.countDocuments({ role: "user", createdAt: { $gte: month } }),
-		ResearchProjectModel.countDocuments(),
-		SessionModel.countDocuments(),
-		ResearchDocumentModel.countDocuments().then(
+		UserModel.countDocuments(userFilter),
+		UserModel.countDocuments({ ...userFilter, lastActiveAt: { $gte: today } }),
+		UserModel.countDocuments({ ...userFilter, createdAt: { $gte: week } }),
+		UserModel.find(userFilter).select("faculty department programme tokensUsed createdAt").lean(),
+		MessageModel.countDocuments({ ...messageFilter, role: "user", createdAt: { $gte: today } }),
+		MessageModel.countDocuments({ ...messageFilter, role: "user", createdAt: { $gte: month } }),
+		ResearchProjectModel.countDocuments(activityFilter),
+		SessionModel.countDocuments(activityFilter),
+		ResearchDocumentModel.countDocuments(activityFilter).then(
 			(n) => n,
 			() => 0,
 		),
-		AiContributionStatementModel.countDocuments(),
-		getAlertStats(),
-		getIncidentStats(),
-		getTokenAdminStats(),
-		getContributionStats(),
-		getUsageAnalytics(),
+		AiContributionStatementModel.countDocuments(uniFilter),
+		getAlertStats(scope),
+		getIncidentStats(scope),
+		getTokenAdminStats(scope),
+		getContributionStats(scope),
+		getUsageAnalytics(scope),
 		MessageModel.aggregate([
-			{ $match: { role: "user", createdAt: { $gte: daysAgo(13) } } },
+			{ $match: { ...messageFilter, role: "user", createdAt: { $gte: daysAgo(13) } } },
 			{
 				$group: {
 					_id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
@@ -138,7 +156,7 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
 			{ $sort: { _id: 1 } },
 		]),
 		GovernanceIncidentModel.aggregate([
-			{ $match: { createdAt: { $gte: daysAgo(29) } } },
+			{ $match: { ...uniFilter, createdAt: { $gte: daysAgo(29) } } },
 			{
 				$group: {
 					_id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
@@ -150,6 +168,7 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
 		GovernanceAlertModel.aggregate([
 			{
 				$match: {
+					...uniFilter,
 					kind: { $in: ["policy_breach", "policy_violation"] },
 					createdAt: { $gte: daysAgo(29) },
 				},
@@ -163,6 +182,9 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
 			{ $sort: { _id: 1 } },
 		]),
 		SessionModel.aggregate([
+			...(Object.keys(activityFilter).length
+				? [{ $match: activityFilter }]
+				: []),
 			{ $group: { _id: "$model", count: { $sum: 1 } } },
 			{ $sort: { count: -1 } },
 			{ $limit: 8 },
@@ -229,6 +251,14 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
 	});
 
 	void contributionStats;
+	void AuditLogModel;
+
+	const governanceHealth: PlatformOverview["widgets"]["systemHealth"] =
+		alertStats.critical > 0 || incidentStats.critical > 0
+			? "degraded"
+			: alertStats.active > 0
+				? "degraded"
+				: "healthy";
 
 	return {
 		widgets: {
@@ -251,11 +281,11 @@ export async function getPlatformOverview(): Promise<PlatformOverview> {
 			highRiskActivities,
 			totalTokensUsed,
 			estimatedAiCost,
-			systemHealth: "healthy",
-			aiServiceStatus: "operational",
+			systemHealth: governanceHealth,
+			aiServiceStatus: "not_monitored",
 			storageUsageGb: Math.round((totalDocumentsGenerated * 0.35 + totalAiConversations * 0.08) * 10) / 10,
-			apiStatus: "operational",
-			platformUptimePercent: 99.9,
+			apiStatus: "not_monitored",
+			platformUptimePercent: null,
 		},
 		charts: {
 			dailyAiUsage,

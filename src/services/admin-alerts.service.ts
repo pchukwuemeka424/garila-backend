@@ -181,7 +181,7 @@ export async function createAlert(
 		linkedAuditId: input.linkedAuditId,
 		linkedIncidentId: input.linkedIncidentId,
 		context: input.context,
-		notificationSent: input.notificationSent ?? (severity === "high" || severity === "critical"),
+		notificationSent: input.notificationSent ?? false,
 		createdBy: actorId,
 		universityId,
 	});
@@ -203,12 +203,18 @@ export async function createAlert(
 	}
 
 	if (severity === "high" || severity === "critical") {
-		void notifyOnAlert({
-			title: doc.title,
-			summary: doc.summary,
-			severity,
-			kind: doc.kind,
-		}).catch(() => undefined);
+		try {
+			await notifyOnAlert({
+				title: doc.title,
+				summary: doc.summary,
+				severity,
+				kind: doc.kind,
+			});
+			await GovernanceAlertModel.findByIdAndUpdate(doc._id, { notificationSent: true });
+			doc.notificationSent = true;
+		} catch {
+			/* leave notificationSent false when delivery fails */
+		}
 	}
 
 	return toRecord(doc.toObject());
@@ -271,6 +277,7 @@ export async function updateAlert(
 
 export async function getAlertStats(scope?: AdminScope) {
 	const sf = scopeFilter(scope);
+	const openStatuses = ["open", "acknowledged", "investigating", "escalated"];
 	const [
 		total,
 		open,
@@ -280,6 +287,8 @@ export async function getAlertStats(scope?: AdminScope) {
 		critical,
 		high,
 		last24h,
+		studentOpen,
+		lecturerOpen,
 	] = await Promise.all([
 		GovernanceAlertModel.countDocuments(sf),
 		GovernanceAlertModel.countDocuments({ ...sf, status: "open" }),
@@ -289,16 +298,26 @@ export async function getAlertStats(scope?: AdminScope) {
 		GovernanceAlertModel.countDocuments({
 			...sf,
 			severity: "critical",
-			status: { $in: ["open", "acknowledged", "investigating", "escalated"] },
+			status: { $in: openStatuses },
 		}),
 		GovernanceAlertModel.countDocuments({
 			...sf,
 			severity: "high",
-			status: { $in: ["open", "acknowledged", "investigating", "escalated"] },
+			status: { $in: openStatuses },
 		}),
 		GovernanceAlertModel.countDocuments({
 			...sf,
 			createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+		}),
+		GovernanceAlertModel.countDocuments({
+			...sf,
+			status: { $in: openStatuses },
+			actorRole: "student",
+		}),
+		GovernanceAlertModel.countDocuments({
+			...sf,
+			status: { $in: openStatuses },
+			actorRole: { $in: ["lecturer", "researcher"] },
 		}),
 	]);
 	return {
@@ -311,5 +330,6 @@ export async function getAlertStats(scope?: AdminScope) {
 		critical,
 		high,
 		last24h,
+		byActorRole: { student: studentOpen, lecturer: lecturerOpen },
 	};
 }

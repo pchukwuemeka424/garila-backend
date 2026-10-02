@@ -11,16 +11,21 @@ function adminEmail(): string {
 }
 
 function adminPassword(): string {
-	return process.env.DEFAULT_ADMIN_PASSWORD?.trim() || DEFAULT_ADMIN_PASSWORD;
+	const fromEnv = process.env.DEFAULT_ADMIN_PASSWORD?.trim();
+	if (fromEnv) return fromEnv;
+	if (DEFAULT_ADMIN_PASSWORD) return DEFAULT_ADMIN_PASSWORD;
+	throw new Error(
+		"DEFAULT_ADMIN_ENABLED=true requires DEFAULT_ADMIN_PASSWORD in the environment.",
+	);
 }
 
 function adminName(): string {
 	return process.env.DEFAULT_ADMIN_NAME?.trim() || DEFAULT_ADMIN_NAME;
 }
 
-/** Ensures the default admin account exists for /admin/login. */
+/** Opt-in only: ensures a bootstrap admin exists. Prefer seeding users in MongoDB. */
 export async function ensureDefaultAdmin(): Promise<void> {
-	if (process.env.DEFAULT_ADMIN_ENABLED === "false") return;
+	if (process.env.DEFAULT_ADMIN_ENABLED !== "true") return;
 
 	const email = adminEmail();
 	const password = adminPassword();

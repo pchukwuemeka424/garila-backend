@@ -349,7 +349,7 @@ export async function verifyContributionStatement(
 
 export async function getContributionStats(scope?: AdminScope) {
 	const base = scopeFilter(scope);
-	const [total, verified, incomplete, aiAssisted, humanEdited] = await Promise.all([
+	const [total, verified, incomplete, aiAssisted, humanEdited, rows] = await Promise.all([
 		AiContributionStatementModel.countDocuments(base),
 		AiContributionStatementModel.countDocuments({ ...base, verified: true }),
 		AiContributionStatementModel.countDocuments({
@@ -361,7 +361,27 @@ export async function getContributionStats(scope?: AdminScope) {
 			$or: [{ aiAssisted: true }, { aiAssisted: { $exists: false } }],
 		}),
 		AiContributionStatementModel.countDocuments({ ...base, humanEdited: true }),
+		AiContributionStatementModel.find(base).select("ownerId").lean(),
 	]);
+
+	const ownerIds = [
+		...new Set(
+			rows
+				.map((r) => r.ownerId?.toString())
+				.filter((id): id is string => Boolean(id)),
+		),
+	];
+	const owners = await UserModel.find({ _id: { $in: ownerIds } })
+		.select("role")
+		.lean();
+	const roleByOwner = new Map(owners.map((o) => [o._id.toString(), o.role]));
+	const byOwnerRole = { student: 0, lecturer: 0 };
+	for (const row of rows) {
+		const role = roleByOwner.get(row.ownerId?.toString() ?? "") ?? "";
+		if (role === "student") byOwnerRole.student += 1;
+		else if (role === "lecturer" || role === "researcher") byOwnerRole.lecturer += 1;
+	}
+
 	return {
 		total,
 		verified,
@@ -369,5 +389,6 @@ export async function getContributionStats(scope?: AdminScope) {
 		aiAssisted,
 		humanEdited,
 		pendingVerification: Math.max(0, total - verified),
+		byOwnerRole,
 	};
 }

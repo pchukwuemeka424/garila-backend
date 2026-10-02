@@ -28,6 +28,7 @@ import { userRepository } from "../services/portal/portal-users.js";
 import { deductStudentTokens } from "../services/student-token.service.js";
 import { assertUniversityFeature } from "../lib/assert-university-feature.js";
 import { UniversityFeatureDisabledError } from "../lib/university-features.js";
+import { recordAiGovernanceUse } from "../services/ai-governance-telemetry.service.js";
 
 function ok(reply: FastifyReply, data: unknown, status = 200) {
 	return reply.code(status).send({ success: true, data });
@@ -370,6 +371,15 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 					actor.userId,
 				);
 				await deductStudentTokens(actor.userId, 800).catch(() => null);
+				void recordAiGovernanceUse({
+					userId: actor.userId,
+					universityId: actor.tenantId,
+					surface: "portal_page_summary",
+					summary: "Lecturer ran page AI summary",
+					outputRef: `portal-page:${request.params.id}:${request.params.pageId}`,
+					outputTitle: "Page AI summary",
+					recordIntegrity: true,
+				});
 				return ok(reply, result);
 			} catch (error) {
 				return fail(reply, error);
@@ -482,11 +492,13 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 				);
 				const singlePage = isSinglePageProjectType(String(owned.projectType));
 				const { text, html } = await extractUploadedDocument(kind, buffer);
-				const { sections } = singlePage
+				const analysed = singlePage
 					? {
 							sections: asSingleDocumentPage(text, html, "Assignment"),
+							method: "heuristic" as const,
 						}
 					: await analyseDocumentIntoSections(createAIProvider(), text, html);
+				const { sections, method } = analysed;
 				if (sections.length === 0) {
 					throw new ValidationError("Could not find sections in this document");
 				}
@@ -497,7 +509,20 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 					actor.userId,
 					{ mode, sections },
 				);
-				return ok(reply, project, 201);
+				return ok(
+					reply,
+					{
+						project,
+						import: {
+							method,
+							sectionCount: sections.length,
+							fileName: body.fileName,
+							mode,
+							singlePage,
+						},
+					},
+					201,
+				);
 			} catch (error) {
 				return fail(reply, error);
 			}
@@ -562,6 +587,15 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 				message,
 			);
 			await deductStudentTokens(actor.userId, 200).catch(() => null);
+			void recordAiGovernanceUse({
+				userId: actor.userId,
+				universityId: actor.tenantId,
+				surface: "portal_ai_chat",
+				summary: "Student used project AI assist",
+				outputRef: `portal-chat:${request.params.id}`,
+				outputTitle: "Project AI assist",
+				recordIntegrity: false,
+			});
 			return ok(reply, result);
 		} catch (error) {
 			return fail(reply, error);
@@ -698,6 +732,15 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 					actor.userId,
 				);
 				await deductStudentTokens(actor.userId, 800).catch(() => null);
+				void recordAiGovernanceUse({
+					userId: actor.userId,
+					universityId: actor.tenantId,
+					surface: "chapter_ai_reviewer",
+					summary: "Lecturer ran chapter AI reviewer",
+					outputRef: `portal-chapter:${request.params.id}`,
+					outputTitle: "Chapter AI review",
+					recordIntegrity: true,
+				});
 				return ok(reply, result);
 			} catch (error) {
 				return fail(reply, error);

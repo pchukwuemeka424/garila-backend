@@ -336,12 +336,32 @@ export async function reviewProvenanceRecord(
 
 export async function getProvenanceStats(scope?: AdminScope) {
 	const base = scopeFilter(scope);
-	const [total, underReview, cleared, escalated, available] = await Promise.all([
+	const [total, underReview, cleared, escalated, available, rows] = await Promise.all([
 		ResearchProvenanceRecordModel.countDocuments(base),
 		ResearchProvenanceRecordModel.countDocuments({ ...base, status: "under_review" }),
 		ResearchProvenanceRecordModel.countDocuments({ ...base, status: "cleared" }),
 		ResearchProvenanceRecordModel.countDocuments({ ...base, status: "escalated" }),
 		ResearchProvenanceRecordModel.countDocuments({ ...base, status: "available" }),
+		ResearchProvenanceRecordModel.find(base).select("ownerId").lean(),
 	]);
-	return { total, underReview, cleared, escalated, available };
+
+	const ownerIds = [
+		...new Set(
+			rows
+				.map((r) => r.ownerId?.toString())
+				.filter((id): id is string => Boolean(id)),
+		),
+	];
+	const owners = await UserModel.find({ _id: { $in: ownerIds } })
+		.select("role")
+		.lean();
+	const roleByOwner = new Map(owners.map((o) => [o._id.toString(), o.role]));
+	const byOwnerRole = { student: 0, lecturer: 0 };
+	for (const row of rows) {
+		const role = roleByOwner.get(row.ownerId?.toString() ?? "") ?? "";
+		if (role === "student") byOwnerRole.student += 1;
+		else if (role === "lecturer" || role === "researcher") byOwnerRole.lecturer += 1;
+	}
+
+	return { total, underReview, cleared, escalated, available, byOwnerRole };
 }
