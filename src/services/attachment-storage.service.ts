@@ -132,7 +132,11 @@ export async function storeAttachment(input: {
 				byteLength: decoded.buffer.byteLength,
 			};
 		} catch (error) {
-			if (payload.length <= MAX_MONGO_ATTACHMENT_CHARS) {
+			// Fail closed in production when object storage is configured — do not embed bytes in Mongo dumps.
+			if (
+				process.env.NODE_ENV !== "production" &&
+				payload.length <= MAX_MONGO_ATTACHMENT_CHARS
+			) {
 				console.warn(
 					"[attachment-storage] MinIO upload failed; saving file in the database instead.",
 					s3ErrorMessage(error),

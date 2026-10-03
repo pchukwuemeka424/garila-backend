@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 
 import { hashPassword } from "../lib/password.js";
+import { assertPasswordPolicy } from "../lib/password-policy.js";
 import { MessageModel } from "../db/models/Message.js";
 import { SessionModel } from "../db/models/Session.js";
 import { enrichSessionsWithOwnership } from "./session-enrichment.service.js";
@@ -193,9 +194,7 @@ export async function createUser(
 	},
 	scope?: AdminScope,
 ) {
-	if (input.password && input.password.length < 8) {
-		throw new Error("Password must be at least 8 characters.");
-	}
+	if (input.password) assertPasswordPolicy(input.password);
 
 	const role = input.role ?? "lecturer";
 	assertRoleAssignment(scope, role);

@@ -49,8 +49,13 @@ async function loadAdminActor(authorization?: string) {
 	const payload = verifyAuthToken(token);
 	if (!payload?.sub) throw new AdminRequiredError(401, "Invalid or expired token.");
 
-	const user = await UserModel.findById(payload.sub).select("role universityId faculty department permissions").lean();
+	const user = await UserModel.findById(payload.sub)
+		.select("role status universityId faculty department permissions")
+		.lean();
 	if (!user) throw new AdminRequiredError(401, "User not found.");
+	if (user.status !== "active") {
+		throw new AdminRequiredError(403, "Account is not active.");
+	}
 	if (!isAdminConsoleRole(user.role)) {
 		throw new AdminRequiredError(403, "Admin access required.");
 	}

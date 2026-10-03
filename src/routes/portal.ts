@@ -467,6 +467,7 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 
 	app.post<{ Params: { id: string } }>(
 		"/api/portal/projects/:id/import-document",
+		{ bodyLimit: 25 * 1024 * 1024 },
 		async (request, reply) => {
 			try {
 				const actor = await actorOf(request);
@@ -544,7 +545,10 @@ export async function registerPortalRoutes(app: FastifyInstance): Promise<void> 
 		}
 	});
 
-	app.post<{ Params: { id: string } }>("/api/portal/projects/:id/images", async (request, reply) => {
+	app.post<{ Params: { id: string } }>(
+		"/api/portal/projects/:id/images",
+		{ bodyLimit: 8 * 1024 * 1024 },
+		async (request, reply) => {
 		try {
 			const actor = await actorOf(request);
 			requireStudent(actor);

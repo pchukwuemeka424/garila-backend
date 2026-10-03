@@ -2,7 +2,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { getAuthSecret } from "../config/env.js";
 
-const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Access token lifetime (shorter reduces impact of stolen JWTs without revocation). */
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type AuthTokenPayload = {
 	sub: string;

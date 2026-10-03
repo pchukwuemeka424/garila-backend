@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 
 import { hashPassword } from "../lib/password.js";
+import { assertPasswordPolicy } from "../lib/password-policy.js";
 import { UserModel } from "../db/models/User.js";
 import type { AdminScope } from "../lib/require-admin.js";
 import { universityFilterForScope } from "../lib/require-admin.js";
@@ -30,7 +31,7 @@ export {
 };
 
 export async function resetUserPassword(id: string, password: string, scope?: AdminScope) {
-	if (password.length < 8) throw new Error("Password must be at least 8 characters.");
+	assertPasswordPolicy(password);
 
 	const existing = await UserModel.findById(id).lean();
 	if (!existing) return null;

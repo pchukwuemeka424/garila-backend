@@ -13,6 +13,7 @@ import {
 } from "../lib/email-templates.js";
 import { sendMail } from "../lib/mailer.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
+import { assertPasswordPolicy } from "../lib/password-policy.js";
 import { POLICIES_REQUIRED_ERROR } from "../lib/policy-consent.js";
 import {
 	getActiveUniversityByCatalogueId,
@@ -153,7 +154,7 @@ export async function registerStudent(input: {
 
 	if (name.length < 2) throw new Error("Please enter your full name.");
 	if (!validateEmail(email)) throw new Error("Please enter a valid email address.");
-	if (input.password.length < 8) throw new Error("Password must be at least 8 characters.");
+	assertPasswordPolicy(input.password);
 	if (department.length < 2) throw new Error("Please enter your program or department.");
 	assertPoliciesAccepted(input.acceptedPolicies);
 
@@ -226,7 +227,7 @@ export async function registerLecturer(input: {
 	if (name.length < 2) throw new Error("Please enter your full name.");
 	if (!validateEmail(email)) throw new Error("Please enter a valid email address.");
 	if (isFreeEmail(email)) throw new Error(LECTURER_FREE_EMAIL_ERROR);
-	if (input.password.length < 8) throw new Error("Password must be at least 8 characters.");
+	assertPasswordPolicy(input.password);
 	if (department.length < 2) throw new Error("Please enter your department or faculty.");
 	assertPoliciesAccepted(input.acceptedPolicies);
 
@@ -345,8 +346,14 @@ export async function requestPasswordReset(input: {
 	const user = await UserModel.findOne({ email }).select(
 		"+passwordHash +passwordResetTokenHash +passwordResetExpires",
 	);
+
+	// Always return the same message to avoid account enumeration.
+	const response: { message: string; devResetUrl?: string } = {
+		message: RESET_SENT_MESSAGE,
+	};
+
 	if (!user?.passwordHash || user.status !== "active") {
-		throw new Error("No account exists for that email.");
+		return response;
 	}
 
 	const rawToken = randomBytes(32).toString("hex");
@@ -374,9 +381,6 @@ export async function requestPasswordReset(input: {
 		}
 	}
 
-	const response: { message: string; devResetUrl?: string } = {
-		message: RESET_SENT_MESSAGE,
-	};
 	if (!delivered && process.env.NODE_ENV !== "production") {
 		response.devResetUrl = resetUrl;
 	}
@@ -391,9 +395,7 @@ export async function resetPasswordWithToken(input: {
 	if (!token || token.length < 32) {
 		throw new Error("Invalid or expired reset link.");
 	}
-	if (input.password.length < 8) {
-		throw new Error("Password must be at least 8 characters.");
-	}
+	assertPasswordPolicy(input.password);
 
 	const tokenHash = hashResetToken(token);
 	const user = await UserModel.findOne({

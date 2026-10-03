@@ -2,19 +2,24 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 
 import { connectMongo, disconnectMongo } from "./db/connect.js";
 import { extractBearerToken, verifyAuthToken } from "./lib/auth-token.js";
+import { ChatSessionRegistry } from "./lib/chat-registry.js";
 import { createAppContext } from "./lib/app-context.js";
+import { isPublicApiRoute } from "./lib/public-api.js";
+import { AuthRequiredError, resolveActiveUserId, requireAuthUser } from "./lib/require-auth.js";
 import { getRepoRoot } from "./lib/paths.js";
 import { ensureSupportedNodeVersion } from "./system/node-version.js";
 import { listOutputs } from "./server/outputs.js";
-import { ChatService } from "./services/chat.service.js";
 import { assertS3Ready, s3Enabled } from "./services/s3.service.js";
 import { getS3Bucket, getS3Endpoint } from "./config/env.js";
+import { SessionModel } from "./db/models/Session.js";
 import {
 	acceptPolicies,
 	getUserById,
@@ -25,12 +30,8 @@ import {
 	resetPasswordWithToken,
 } from "./services/auth.service.js";
 import {
-	createUser,
-	deleteUser,
 	getDashboardStats,
 	listRecentSessions,
-	listUsers,
-	updateUser,
 } from "./services/dashboard.service.js";
 import {
 	deleteAllSavedResearch,
@@ -286,10 +287,7 @@ import {
 } from "./lib/university-features.js";
 
 async function resolveUserId(authorization?: string): Promise<string | null> {
-	const token = extractBearerToken(authorization);
-	if (!token) return null;
-	const payload = verifyAuthToken(token);
-	return payload?.sub ?? null;
+	return resolveActiveUserId(authorization);
 }
 
 async function assertUserFeature(
@@ -318,19 +316,6 @@ function datasetErrorMessage(error: unknown): string {
 		return "Could not save the dataset. Check the file and try again.";
 	}
 	return String(error);
-}
-
-function resolveUserIdFromWsUrl(urlPath: string | undefined): string | null {
-	if (!urlPath) return null;
-	try {
-		const url = new URL(urlPath, "http://localhost");
-		const token = url.searchParams.get("token");
-		if (!token) return null;
-		const payload = verifyAuthToken(token);
-		return payload?.sub ?? null;
-	} catch {
-		return null;
-	}
 }
 
 function resolveStaticRoot(repoRoot: string): string | null {
@@ -401,7 +386,7 @@ export async function startServer(port: number): Promise<void> {
 	await normalizeApprovalDefaults();
 
 	const ctx = createAppContext();
-	const chat = new ChatService(ctx);
+	const chatRegistry = new ChatSessionRegistry(ctx);
 	await failOrphanedResearchJobs();
 	const repoRoot = getRepoRoot();
 	const staticRoot = resolveStaticRoot(repoRoot);
@@ -409,13 +394,16 @@ export async function startServer(port: number): Promise<void> {
 
 	const app = Fastify({
 		logger: false,
-		// Required behind nginx / Coolify reverse proxies
+		// Required behind nginx / Coolify reverse proxies (expose Node only on the internal network)
 		trustProxy: true,
-		// Base64 document/dataset uploads (MinIO-backed) can exceed Fastify's 1MB default
-		bodyLimit: 25 * 1024 * 1024,
+		// Keep the global default modest; large upload routes raise bodyLimit locally.
+		bodyLimit: 2 * 1024 * 1024,
 	});
 
 	const corsOrigin = process.env.CORS_ORIGIN?.trim();
+	if (process.env.NODE_ENV === "production" && !corsOrigin) {
+		throw new Error("CORS_ORIGIN is required in production (comma-separated allowlist).");
+	}
 	await app.register(cors, {
 		origin: corsOrigin
 			? corsOrigin.split(",").map((value) => value.trim()).filter(Boolean)
@@ -423,7 +411,37 @@ export async function startServer(port: number): Promise<void> {
 		methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "Authorization"],
 	});
+	await app.register(helmet, {
+		contentSecurityPolicy: false,
+		crossOriginEmbedderPolicy: false,
+		hsts: process.env.NODE_ENV === "production" ? { maxAge: 15552000 } : false,
+	});
+	await app.register(rateLimit, {
+		global: true,
+		max: 300,
+		timeWindow: "1 minute",
+		allowList: (request) => {
+			const path = (request.url ?? "").split("?")[0] ?? "";
+			return path === "/api/health";
+		},
+	});
 	await app.register(websocket);
+
+	// Default-deny: all /api/* except an explicit public allowlist require an active session.
+	app.addHook("onRequest", async (request, reply) => {
+		if (request.method === "OPTIONS") return;
+		const path = (request.url ?? "").split("?")[0] ?? "";
+		if (!path.startsWith("/api/")) return;
+		if (isPublicApiRoute(request.method, path)) return;
+		try {
+			await requireAuthUser(request.headers.authorization);
+		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			throw error;
+		}
+	});
 
 	if (staticRoot) {
 		await app.register(fastifyStatic, {
@@ -441,21 +459,37 @@ export async function startServer(port: number): Promise<void> {
 		}));
 	}
 
-	app.get("/api/health", async () => {
-		const s3: { enabled: boolean; ok: boolean | null; bucket?: string; endpoint?: string; error?: string } =
-			{ enabled: s3Enabled(), ok: null };
-		if (s3.enabled) {
-			try {
-				await assertS3Ready();
-				s3.ok = true;
-				s3.bucket = getS3Bucket();
-				s3.endpoint = getS3Endpoint() ?? undefined;
-			} catch (error) {
-				s3.ok = false;
-				s3.error = error instanceof Error ? error.message : String(error);
+	app.get("/api/health", async () => ({ ok: true }));
+
+	app.get("/api/health/detail", async (request, reply) => {
+		try {
+			await requireSuperAdmin(request.headers.authorization);
+			const s3: {
+				enabled: boolean;
+				ok: boolean | null;
+				bucket?: string;
+				endpoint?: string;
+				error?: string;
+			} = { enabled: s3Enabled(), ok: null };
+			if (s3.enabled) {
+				try {
+					await assertS3Ready();
+					s3.ok = true;
+					s3.bucket = getS3Bucket();
+					s3.endpoint = getS3Endpoint() ?? undefined;
+				} catch (error) {
+					s3.ok = false;
+					s3.error = error instanceof Error ? error.message : String(error);
+				}
 			}
+			return { ok: true, version: ctx.version, s3 };
+		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			return reply.code(500).send({ error: message });
 		}
-		return { ok: true, version: ctx.version, s3 };
 	});
 
 	/** Public: institutions that are onboarded and allowed to self-register (optionally by country). */
@@ -483,7 +517,10 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.post("/api/auth/register", async (request, reply) => {
+	app.post(
+		"/api/auth/register",
+		{ config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+		async (request, reply) => {
 		const body = request.body as {
 			name?: string;
 			email?: string;
@@ -515,7 +552,10 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.post("/api/auth/register-student", async (request, reply) => {
+	app.post(
+		"/api/auth/register-student",
+		{ config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+		async (request, reply) => {
 		const body = request.body as {
 			name?: string;
 			email?: string;
@@ -547,7 +587,10 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.post("/api/auth/login", async (request, reply) => {
+	app.post(
+		"/api/auth/login",
+		{ config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+		async (request, reply) => {
 		const body = request.body as { email?: string; password?: string };
 		if (!body.email?.trim() || !body.password) {
 			return reply.code(400).send({ error: "Email and password are required." });
@@ -561,36 +604,43 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.post("/api/auth/forgot-password", async (request, reply) => {
-		const body = request.body as { email?: string };
-		if (!body.email?.trim()) {
-			return reply.code(400).send({ error: "Email is required." });
-		}
-		try {
-			return await requestPasswordReset({ email: body.email });
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const notFound = message === "No account exists for that email.";
-			const badRequest =
-				notFound ||
-				message === "Enter a valid email address." ||
-				message.startsWith("Unable to send");
-			return reply.code(badRequest ? (notFound ? 404 : 400) : 500).send({ error: message });
-		}
-	});
+	app.post(
+		"/api/auth/forgot-password",
+		{
+			config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+		},
+		async (request, reply) => {
+			const body = request.body as { email?: string };
+			if (!body.email?.trim()) {
+				return reply.code(400).send({ error: "Email is required." });
+			}
+			try {
+				return await requestPasswordReset({ email: body.email });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const badRequest =
+					message === "Enter a valid email address." || message.startsWith("Unable to send");
+				return reply.code(badRequest ? 400 : 500).send({ error: message });
+			}
+		},
+	);
 
-	app.post("/api/auth/reset-password", async (request, reply) => {
-		const body = request.body as { token?: string; password?: string };
-		if (!body.token?.trim() || !body.password) {
-			return reply.code(400).send({ error: "Reset token and new password are required." });
-		}
-		try {
-			return await resetPasswordWithToken({ token: body.token, password: body.password });
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
-		}
-	});
+	app.post(
+		"/api/auth/reset-password",
+		{ config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+		async (request, reply) => {
+			const body = request.body as { token?: string; password?: string };
+			if (!body.token?.trim() || !body.password) {
+				return reply.code(400).send({ error: "Reset token and new password are required." });
+			}
+			try {
+				return await resetPasswordWithToken({ token: body.token, password: body.password });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return reply.code(400).send({ error: message });
+			}
+		},
+	);
 
 	app.get("/api/auth/me", async (request, reply) => {
 		const token = extractBearerToken(request.headers.authorization);
@@ -708,7 +758,10 @@ export async function startServer(port: number): Promise<void> {
 		})),
 	}));
 
-	app.get("/api/papers/search", async (request, reply) => {
+	app.get(
+		"/api/papers/search",
+		{ config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+		async (request, reply) => {
 		const query = (request.query as { q?: string }).q?.trim();
 		if (!query) {
 			return reply.code(400).send({ error: "Query parameter q is required." });
@@ -727,7 +780,10 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.post("/api/research/outline", async (request, reply) => {
+	app.post(
+		"/api/research/outline",
+		{ config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+		async (request, reply) => {
 		const body = request.body as {
 			idea?: {
 				id?: string;
@@ -768,14 +824,12 @@ export async function startServer(port: number): Promise<void> {
 		const ideaId = body.idea.id?.trim() || body.idea.title.trim();
 
 		try {
-			const userId = await resolveUserId(request.headers.authorization);
-			if (userId) {
-				await assertUserFeature(userId, "researchAssistant");
-				if (scope === "thesis" || scope === "dissertation") {
-					await assertUserFeature(userId, "advancedResearch");
-				}
-				await assertStudentHasTokenBalance(userId);
+			const userId = await requireAuthUser(request.headers.authorization);
+			await assertUserFeature(userId, "researchAssistant");
+			if (scope === "thesis" || scope === "dissertation") {
+				await assertUserFeature(userId, "advancedResearch");
 			}
+			await assertStudentHasTokenBalance(userId);
 			const sourceContext = await buildResearchSourceContext(userId, body.sources);
 			const hasSourceMaterial = Boolean(
 				body.sources?.projectIds?.length ||
@@ -808,28 +862,26 @@ export async function startServer(port: number): Promise<void> {
 			);
 
 			let tokenQuota;
-			if (userId && result.usage?.totalTokens) {
+			if (result.usage?.totalTokens) {
 				tokenQuota = await deductStudentTokens(userId, result.usage.totalTokens);
 			}
 
-			if (userId) {
-				await saveResearchOutlineRecord(userId, {
-					ideaId,
-					ideaTitle: body.idea.title.trim(),
-					discipline: body.discipline?.trim() || body.disciplineLabel.trim(),
-					topic: body.topic.trim(),
-					scope: scope,
-					outline: result.outline,
-				});
-				void recordAiGovernanceUse({
-					userId,
-					surface: "research_outline",
-					summary: `Generated research outline for “${body.idea.title.trim()}”`,
-					outputRef: `research-outline:${ideaId}`,
-					outputTitle: body.idea.title.trim(),
-					recordIntegrity: true,
-				});
-			}
+			await saveResearchOutlineRecord(userId, {
+				ideaId,
+				ideaTitle: body.idea.title.trim(),
+				discipline: body.discipline?.trim() || body.disciplineLabel.trim(),
+				topic: body.topic.trim(),
+				scope: scope,
+				outline: result.outline,
+			});
+			void recordAiGovernanceUse({
+				userId,
+				surface: "research_outline",
+				summary: `Generated research outline for “${body.idea.title.trim()}”`,
+				outputRef: `research-outline:${ideaId}`,
+				outputTitle: body.idea.title.trim(),
+				recordIntegrity: true,
+			});
 
 			return {
 				outline: result.outline,
@@ -838,6 +890,9 @@ export async function startServer(port: number): Promise<void> {
 				...(tokenQuota ? { tokenQuota } : {}),
 			};
 		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
 			const featureReply = featureErrorReply(reply, error);
 			if (featureReply) return featureReply;
 			if (error instanceof Error && error.name === "AbortError") {
@@ -849,7 +904,10 @@ export async function startServer(port: number): Promise<void> {
 		}
 	});
 
-	app.post("/api/research/ideas/generate", async (request, reply) => {
+	app.post(
+		"/api/research/ideas/generate",
+		{ config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+		async (request, reply) => {
 		const body = request.body as {
 			discipline?: string;
 			disciplineLabel?: string;
@@ -874,14 +932,12 @@ export async function startServer(port: number): Promise<void> {
 		}
 
 		try {
-			const userId = await resolveUserId(request.headers.authorization);
-			if (userId) {
-				await assertUserFeature(userId, "researchAssistant");
-				if (scope === "thesis" || scope === "dissertation") {
-					await assertUserFeature(userId, "advancedResearch");
-				}
-				await assertStudentHasTokenBalance(userId);
+			const userId = await requireAuthUser(request.headers.authorization);
+			await assertUserFeature(userId, "researchAssistant");
+			if (scope === "thesis" || scope === "dissertation") {
+				await assertUserFeature(userId, "advancedResearch");
 			}
+			await assertStudentHasTokenBalance(userId);
 			const sourceContext = await buildResearchSourceContext(userId, body.sources);
 
 			const result = await generateResearchIdeas(
@@ -895,20 +951,18 @@ export async function startServer(port: number): Promise<void> {
 			);
 
 			let tokenQuota;
-			if (userId && result.usage?.totalTokens) {
+			if (result.usage?.totalTokens) {
 				tokenQuota = await deductStudentTokens(userId, result.usage.totalTokens);
 			}
 
-			if (userId) {
-				void recordAiGovernanceUse({
-					userId,
-					surface: "research_ideas",
-					summary: `Generated research ideas for “${body.topic.trim()}”`,
-					outputRef: `research-ideas:${body.disciplineLabel.trim()}:${body.topic.trim().slice(0, 80)}`,
-					outputTitle: body.topic.trim(),
-					recordIntegrity: true,
-				});
-			}
+			void recordAiGovernanceUse({
+				userId,
+				surface: "research_ideas",
+				summary: `Generated research ideas for “${body.topic.trim()}”`,
+				outputRef: `research-ideas:${body.disciplineLabel.trim()}:${body.topic.trim().slice(0, 80)}`,
+				outputTitle: body.topic.trim(),
+				recordIntegrity: true,
+			});
 
 			return {
 				ideasMarkdown: result.ideasMarkdown,
@@ -916,6 +970,9 @@ export async function startServer(port: number): Promise<void> {
 				...(tokenQuota ? { tokenQuota } : {}),
 			};
 		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
 			const featureReply = featureErrorReply(reply, error);
 			if (featureReply) return featureReply;
 			if (error instanceof Error && error.name === "AbortError") {
@@ -926,7 +983,17 @@ export async function startServer(port: number): Promise<void> {
 			return reply.code(502).send({ error: message });
 		}
 	});
-	app.get("/api/status", async () => chat.getStatus());
+	app.get("/api/status", async (request, reply) => {
+		try {
+			const userId = await requireAuthUser(request.headers.authorization);
+			return chatRegistry.forUser(userId).getStatus();
+		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			throw error;
+		}
+	});
 
 	app.get("/api/outputs", async () => {
 		await syncOutputArtifacts(ctx.workingDir);
@@ -1550,7 +1617,10 @@ export async function startServer(port: number): Promise<void> {
 		return { documents };
 	});
 
-	app.post("/api/research/documents", async (request, reply) => {
+	app.post(
+		"/api/research/documents",
+		{ bodyLimit: 25 * 1024 * 1024 },
+		async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
 		if (!userId) return reply.code(401).send({ error: "Authentication required." });
 		const body = request.body as {
@@ -1634,7 +1704,10 @@ export async function startServer(port: number): Promise<void> {
 		return { datasets };
 	});
 
-	app.post("/api/research/datasets", async (request, reply) => {
+	app.post(
+		"/api/research/datasets",
+		{ bodyLimit: 25 * 1024 * 1024 },
+		async (request, reply) => {
 		const userId = await resolveUserId(request.headers.authorization);
 		if (!userId) return reply.code(401).send({ error: "Authentication required." });
 		const body = request.body as {
@@ -1882,72 +1955,86 @@ export async function startServer(port: number): Promise<void> {
 		return { synced, outputs };
 	});
 
-	app.post("/api/session/reset", async (request) => {
-		const body = request.body as { workflow?: string; topic?: string; prompt?: string };
-		await chat.resetSession(body);
-		return { ok: true, status: chat.getStatus() };
+	app.post("/api/session/reset", async (request, reply) => {
+		try {
+			const userId = await requireAuthUser(request.headers.authorization);
+			const body = request.body as { workflow?: string; topic?: string; prompt?: string };
+			const chat = chatRegistry.forUser(userId);
+			await chat.resetSession({ ...body, userId });
+			return { ok: true, status: chat.getStatus() };
+		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			throw error;
+		}
 	});
 
-	app.post("/api/chat/abort", async () => {
-		await chat.abort();
-		return { ok: true };
+	app.post("/api/chat/abort", async (request, reply) => {
+		try {
+			const userId = await requireAuthUser(request.headers.authorization);
+			await chatRegistry.forUser(userId).abort();
+			return { ok: true };
+		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
+			throw error;
+		}
 	});
 
 	app.get("/api/sessions/:id/messages", async (request, reply) => {
 		const { id } = request.params as { id: string };
 		try {
-			const messages = await chat.getSessionMessages(id);
+			const userId = await requireAuthUser(request.headers.authorization);
+			const session = await SessionModel.findById(id).select("userId").lean();
+			if (!session || session.userId?.toString() !== userId) {
+				return reply.code(404).send({ error: "Session not found." });
+			}
+			const messages = await chatRegistry.forUser(userId).getSessionMessages(id);
 			return { messages };
 		} catch (error) {
+			if (error instanceof AuthRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			return reply.code(400).send({ error: message });
 		}
 	});
 
-	app.get("/api/dashboard/stats", async () => getDashboardStats());
-
-	app.get("/api/dashboard/sessions", async () => ({
-		sessions: await listRecentSessions(),
-	}));
-
-	app.get("/api/users", async () => ({ users: await listUsers() }));
-
-	app.post("/api/users", async (request, reply) => {
-		const body = request.body as { name?: string; email?: string; role?: string; status?: string };
-		if (!body.name?.trim() || !body.email?.trim()) {
-			return reply.code(400).send({ error: "Name and email are required." });
-		}
+	app.get("/api/dashboard/stats", async (request, reply) => {
 		try {
-			const user = await createUser({
-				name: body.name,
-				email: body.email,
-				role: body.role,
-				status: body.status,
-			});
-			return { user };
+			const scope = await requireAdminScope(request.headers.authorization);
+			return getDashboardStats(scope);
 		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
 			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
+			return reply.code(500).send({ error: message });
 		}
 	});
 
-	app.patch<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
-		const body = request.body as Partial<{ name: string; email: string; role: string; status: string }>;
+	app.get("/api/dashboard/sessions", async (request, reply) => {
 		try {
-			const user = await updateUser(request.params.id, body);
-			if (!user) return reply.code(404).send({ error: "User not found." });
-			return { user };
+			const scope = await requireAdminScope(request.headers.authorization);
+			return { sessions: await listRecentSessions(10, scope) };
 		} catch (error) {
+			if (error instanceof AdminRequiredError) {
+				return reply.code(error.statusCode).send({ error: error.message });
+			}
 			const message = error instanceof Error ? error.message : String(error);
-			return reply.code(400).send({ error: message });
+			return reply.code(500).send({ error: message });
 		}
 	});
 
-	app.delete<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
-		const deleted = await deleteUser(request.params.id);
-		if (!deleted) return reply.code(404).send({ error: "User not found." });
-		return { ok: true };
-	});
+	// Legacy /api/users* removed — use /api/admin/users* (scoped admin APIs).
+	app.all("/api/users", async (_request, reply) =>
+		reply.code(410).send({ error: "Removed. Use /api/admin/users." }),
+	);
+	app.all("/api/users/:id", async (_request, reply) =>
+		reply.code(410).send({ error: "Removed. Use /api/admin/users/:id." }),
+	);
 
 	app.get("/api/admin/stats", async (request, reply) => {
 		try {
@@ -2900,7 +2987,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get("/api/admin/backup/tables", async (request, reply) => {
 		try {
-			await requireAdmin(request.headers.authorization);
+			await requireSuperAdmin(request.headers.authorization);
 			const tables = await listBackupTables();
 			return { tables };
 		} catch (error) {
@@ -2914,7 +3001,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get("/api/admin/backup/files", async (request, reply) => {
 		try {
-			await requireAdmin(request.headers.authorization);
+			await requireSuperAdmin(request.headers.authorization);
 			return { files: listBackupFiles() };
 		} catch (error) {
 			if (error instanceof AdminRequiredError) {
@@ -2927,7 +3014,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.post("/api/admin/backup", async (request, reply) => {
 		try {
-			const adminId = await requireAdmin(request.headers.authorization);
+			const adminId = await requireSuperAdmin(request.headers.authorization);
 			const file = await createDatabaseBackup();
 			await recordAuditEvent({
 				action: "admin.backup_created",
@@ -2950,7 +3037,7 @@ export async function startServer(port: number): Promise<void> {
 
 	app.get<{ Params: { filename: string } }>("/api/admin/backup/files/:filename", async (request, reply) => {
 		try {
-			await requireAdmin(request.headers.authorization);
+			await requireSuperAdmin(request.headers.authorization);
 			const { content, size } = readBackupFile(request.params.filename);
 			return reply
 				.header("Content-Type", "application/json; charset=utf-8")
@@ -3831,8 +3918,9 @@ export async function startServer(port: number): Promise<void> {
 	await registerPortalRoutes(app);
 
 	app.register(async (scoped) => {
-		scoped.get("/ws", { websocket: true }, (socket, request) => {
-			const socketUserId = resolveUserIdFromWsUrl(request.url);
+		scoped.get("/ws", { websocket: true }, (socket) => {
+			let socketUserId: string | null = null;
+			let unsubscribe: (() => void) | null = null;
 
 			const send = (payload: Record<string, unknown>) => {
 				if (socket.readyState === socket.OPEN) {
@@ -3840,33 +3928,68 @@ export async function startServer(port: number): Promise<void> {
 				}
 			};
 
-			const unsubscribe = chat.subscribe(send);
-
-			send({
-				type: "connected",
-				status: chat.getStatus(),
-				workflows: workflows.map((w) => ({
-					name: w.name,
-					description: w.description,
-					command: w.command,
-				})),
-			});
+			let authTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+				if (!socketUserId && socket.readyState === socket.OPEN) {
+					send({ type: "error", error: "Authentication required." });
+					socket.close();
+				}
+			}, 10_000);
 
 			socket.on("message", async (raw: Buffer | ArrayBuffer | Buffer[]) => {
 				try {
 					const data = JSON.parse(String(raw)) as {
 						type?: string;
+						token?: string;
 						message?: string;
 						workflow?: string;
 						topic?: string;
 					};
+
+					if (!socketUserId) {
+						if (data.type !== "auth" || !data.token?.trim()) {
+							send({ type: "error", error: "Authentication required." });
+							socket.close();
+							return;
+						}
+						const payload = verifyAuthToken(data.token.trim());
+						if (!payload?.sub) {
+							send({ type: "error", error: "Invalid or expired token." });
+							socket.close();
+							return;
+						}
+						const user = await UserModel.findById(payload.sub).select("status").lean();
+						if (!user || user.status !== "active") {
+							send({ type: "error", error: "Account is not active." });
+							socket.close();
+							return;
+						}
+						socketUserId = payload.sub;
+						if (authTimer) {
+							clearTimeout(authTimer);
+							authTimer = null;
+						}
+						const chat = chatRegistry.forUser(socketUserId);
+						unsubscribe = chat.subscribe(send);
+						send({
+							type: "connected",
+							status: chat.getStatus(),
+							workflows: workflows.map((w) => ({
+								name: w.name,
+								description: w.description,
+								command: w.command,
+							})),
+						});
+						return;
+					}
+
+					const chat = chatRegistry.forUser(socketUserId);
 
 					if (data.type === "reset") {
 						await chat.resetSession({
 							workflow: data.workflow,
 							topic: data.topic,
 							prompt: data.message,
-							userId: socketUserId ?? undefined,
+							userId: socketUserId,
 						});
 						send({ type: "reset_complete", status: chat.getStatus() });
 						return;
@@ -3879,7 +4002,7 @@ export async function startServer(port: number): Promise<void> {
 					}
 
 					if (data.type === "prompt" && data.message) {
-						await chat.sendMessage(data.message, socketUserId ?? undefined);
+						await chat.sendMessage(data.message, socketUserId);
 						send({ type: "prompt_complete" });
 						return;
 					}
@@ -3891,7 +4014,10 @@ export async function startServer(port: number): Promise<void> {
 				}
 			});
 
-			socket.on("close", () => unsubscribe());
+			socket.on("close", () => {
+				if (authTimer) clearTimeout(authTimer);
+				unsubscribe?.();
+			});
 		});
 	});
 
@@ -3925,7 +4051,7 @@ export async function startServer(port: number): Promise<void> {
 		const forceTimer = setTimeout(() => process.exit(0), 2500);
 		forceTimer.unref?.();
 		try {
-			await chat.abort();
+			await chatRegistry.abortAll();
 			await app.close();
 			await disconnectMongo();
 		} catch {

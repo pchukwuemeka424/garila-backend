@@ -68,13 +68,23 @@ export function getOpenRouterApiKey(): string {
 	return key;
 }
 
+const DEV_AUTH_SECRET_FALLBACK = "feynman-dev-auth-secret-change-in-production";
+
 export function getAuthSecret(): string {
 	const secret = process.env.AUTH_SECRET?.trim();
-	if (secret) return secret;
-	if (process.env.NODE_ENV === "production") {
-		throw new Error("AUTH_SECRET is required in production.");
+	if (secret) {
+		if (secret === DEV_AUTH_SECRET_FALLBACK && process.env.NODE_ENV === "production") {
+			throw new Error("AUTH_SECRET must not use the development default in production.");
+		}
+		return secret;
 	}
-	return "feynman-dev-auth-secret-change-in-production";
+	// Fail closed unless explicitly local development.
+	if (process.env.NODE_ENV === "development") {
+		return DEV_AUTH_SECRET_FALLBACK;
+	}
+	throw new Error(
+		"AUTH_SECRET is required. Set AUTH_SECRET in the environment (NODE_ENV=development allows a local fallback).",
+	);
 }
 
 /** Public web app origin used in password-reset emails (no trailing slash). */
